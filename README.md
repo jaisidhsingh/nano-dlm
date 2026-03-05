@@ -24,7 +24,7 @@ a bidirectional Transformer to predict the original tokens.
 ## Installation
 
 ```bash
-pip install jax jaxlib equinox optax tyro tiktoken datasets numpy
+pip install jax jaxlib flax optax tyro tiktoken datasets numpy
 ```
 
 For GPU / TPU JAX builds follow the [official JAX install guide](https://github.com/google/jax#installation).

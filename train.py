@@ -1,48 +1,44 @@
 """
-train.py — Training entry point for nano-dlm.
+train.py — Training entry point for nano-dlm (Flax NNX version).
 
 Usage
 ─────
-Single device (CPU/GPU/TPU):
-    python train.py
+    python train.py                              # defaults
+    python train.py --model.n_layers 12 --train.lr 1e-4
+    python train.py --help                       # all flags
 
-Multi-device (e.g. 8 GPUs / TPU pod):
-    python train.py --train.batch_size 512
+Multi-device  (jax.pmap)
+────────────────────────
+We use the nnx.split / nnx.merge pattern so that NNX module state can be
+replicated and sharded across devices as plain JAX pytrees:
 
-Override any config field via CLI (powered by tyro):
-    python train.py --model.n_layers 12 --model.d_model 768 \\
-                    --train.lr 1e-4 --train.max_steps 500000 \\
-                    --schedule.kind cosine --data.dataset wikitext103
+  graphdef, state = nnx.split(optimizer)      # outside pmap
+  rep_state = jax.device_put_replicated(state, jax.devices())
 
-The training loop
-─────────────────
-1.  Sample a random diffusion time t ~ Uniform{1, …, T}.
-2.  Corrupt x₀ → xₜ via q_sample (absorbing / masking).
-3.  Predict clean-token logits via DiffusionTransformer(xₜ, t).
-4.  Compute cross-entropy loss *only at masked positions*.
-5.  Backprop through Equinox model, clip gradients, AdamW step.
+  @jax.pmap
+  def train_step(state, batch, rng):
+      optimizer = nnx.merge(graphdef, state)   # inside pmap
+      ...
+      _, new_state = nnx.split(optimizer)
+      return new_state, loss
 
-Multi-device strategy: jax.pmap over the batch dimension.
-  • Model params are replicated across devices (standard data parallelism).
-  • Gradients are summed across devices via pmean inside the pmap'd step.
-  • No model parallelism — kept minimal for clarity.
+nnx.Optimizer wraps both the model AND optax optimizer state, so a single
+split/merge captures everything needed for a gradient step.
 """
 
 from __future__ import annotations
-import os
 import math
 import time
 import json
 import pickle
 import functools
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 import jax
 import jax.numpy as jnp
 import optax
-import equinox as eqx
+import flax.nnx as nnx
 import tyro
 
 from config import Config, validate
@@ -51,21 +47,15 @@ from model import DiffusionTransformer, count_params
 from data import make_loaders
 
 
-# ---------------------------------------------------------------------------
-# Loss
-# ---------------------------------------------------------------------------
-
 def compute_loss(
     model: DiffusionTransformer,
-    batch: jax.Array,        # (local_bs, L)  int32
+    batch: jax.Array,  # (local_bs, L)  int32
     schedule: NoiseSchedule,
     rng: jax.Array,
-    enable_dropout: bool = True,
 ) -> jax.Array:
     """
-    MDLM / D3PM absorbing-diffusion loss:
-        L = -E_{t, xₜ}[ Σ_{i: xₜᵢ=[MASK]} log p_θ(x₀ᵢ | xₜ, t) ]
-    Returns scalar loss (mean over batch and masked positions).
+    MDLM absorbing-diffusion loss:
+      L = -E_{t,xₜ}[ Σᵢ λₜ · 1[masked] · log p_θ(x₀ᵢ | xₜ, t) ]
     """
     B, L = batch.shape
     mask_id = model.cfg.mask_token_id
@@ -73,177 +63,133 @@ def compute_loss(
 
     rng_t, rng_q, rng_model = jax.random.split(rng, 3)
 
-    # Sample diffusion times  t ~ Uniform{1, …, T}
-    t = jax.random.randint(rng_t, shape=(B,), minval=1, maxval=T + 1)  # (B,)
+    t = jax.random.randint(rng_t, (B,), 1, T + 1)  # (B,)
+    xt = schedule.q_sample(batch, t, mask_id, rng_q)  # (B, L)
 
-    # Forward corrupt
-    xt = schedule.q_sample(batch, t, mask_id, rng_q)    # (B, L)
+    logits = model(xt, t, T, training=True, rng=rng_model)  # (B, L, V)
 
-    # Model prediction
-    logits = model(xt, t, T, enable_dropout=enable_dropout, key=rng_model)  # (B, L, V)
+    is_masked = (xt == mask_id).astype(jnp.float32)
+    log_probs = jax.nn.log_softmax(logits, axis=-1)
+    target_lp = log_probs[jnp.arange(B)[:, None], jnp.arange(L)[None, :], batch]
+    lw = schedule.loss_weight(t)[:, None]
 
-    # Cross-entropy at masked positions only
-    is_masked = (xt == mask_id).astype(jnp.float32)     # (B, L)
-    log_probs = jax.nn.log_softmax(logits, axis=-1)      # (B, L, V)
+    loss = -jnp.sum(target_lp * is_masked * lw) / (jnp.sum(is_masked) + 1e-8)
+    return loss
 
-    # Gather log-prob of the ground-truth token
-    # log_probs[b, l, batch[b, l]]
-    target_log_probs = log_probs[
-        jnp.arange(B)[:, None],
-        jnp.arange(L)[None, :],
-        batch,
-    ]  # (B, L)
-
-    # Optional MDLM loss re-weighting by λₜ = ᾱₜ / (1 - ᾱₜ)
-    lw = schedule.loss_weight(t)[:, None]  # (B, 1)
-
-    loss_per_token      = -target_log_probs * is_masked  # zero at unmasked
-    weighted_loss       = loss_per_token * lw
-
-    n_masked = jnp.sum(is_masked) + 1e-8
-    return jnp.sum(weighted_loss) / n_masked
-
-
-# ---------------------------------------------------------------------------
-# LR schedule: linear warm-up → cosine decay
-# ---------------------------------------------------------------------------
 
 def lr_schedule(step: int, cfg) -> float:
     if step < cfg.warmup_steps:
         return cfg.lr * step / max(1, cfg.warmup_steps)
     progress = (step - cfg.warmup_steps) / max(1, cfg.max_steps - cfg.warmup_steps)
-    coeff    = 0.5 * (1.0 + math.cos(math.pi * progress))
+    coeff = 0.5 * (1.0 + math.cos(math.pi * progress))
     return cfg.min_lr + coeff * (cfg.lr - cfg.min_lr)
 
-
-# ---------------------------------------------------------------------------
-# Optimizer
-# ---------------------------------------------------------------------------
 
 def make_optimizer(cfg) -> optax.GradientTransformation:
     schedule_fn = optax.join_schedules(
         schedules=[
-            optax.linear_schedule(0.0, cfg.lr, transition_steps=cfg.warmup_steps),
-            optax.cosine_decay_schedule(cfg.lr, cfg.max_steps - cfg.warmup_steps,
-                                        alpha=cfg.min_lr / cfg.lr),
+            optax.linear_schedule(0.0, cfg.lr, cfg.warmup_steps),
+            optax.cosine_decay_schedule(
+                cfg.lr, cfg.max_steps - cfg.warmup_steps, alpha=cfg.min_lr / cfg.lr
+            ),
         ],
         boundaries=[cfg.warmup_steps],
     )
-    tx = optax.chain(
-        optax.clip_by_global_norm(cfg.clip_grad_norm) if cfg.clip_grad_norm > 0
-            else optax.identity(),
-        optax.adamw(learning_rate=schedule_fn,
-                    b1=cfg.beta1, b2=cfg.beta2,
-                    weight_decay=cfg.weight_decay),
+    return optax.chain(
+        optax.clip_by_global_norm(cfg.clip_grad_norm)
+        if cfg.clip_grad_norm > 0
+        else optax.identity(),
+        optax.adamw(
+            learning_rate=schedule_fn,
+            b1=cfg.beta1,
+            b2=cfg.beta2,
+            weight_decay=cfg.weight_decay,
+        ),
     )
-    return tx
 
 
 # ---------------------------------------------------------------------------
-# pmap-compatible train step
+# pmap-compatible train / eval steps
 # ---------------------------------------------------------------------------
 
-@functools.partial(jax.pmap, axis_name="devices",
-                   in_axes=(0, 0, None, 0),
-                   out_axes=(0, 0))
-def train_step(
-    params_and_model,        # model with replicated params (one shard per device)
-    batch: jax.Array,        # (local_bs, L)  per device
-    schedule: NoiseSchedule, # static (same on all devices)
-    rng: jax.Array,          # (2,) per device — unique per device
-):
-    """One gradient update step, executed in parallel across devices."""
-    model, opt_state = params_and_model
+# graphdef is captured as a Python closure (static, same on all devices)
+_graphdef = None
+
+
+@functools.partial(jax.pmap, axis_name="devices")
+def _train_step(state, batch, schedule_alpha_bar, schedule_T, rng):
+    """One gradient-update step, pmap'd across batch dimension."""
+    optimizer: nnx.Optimizer = nnx.merge(_graphdef, state)
+    model = optimizer.model
+
+    # Reconstruct a minimal schedule view inside pmap (no Python object)
+    schedule = _ScheduleView(schedule_alpha_bar, int(schedule_T))
 
     def loss_fn(m):
-        return compute_loss(m, batch, schedule, rng, enable_dropout=True)
+        return compute_loss(m, batch, schedule, rng)
 
-    loss, grads = eqx.filter_value_and_grad(loss_fn)(model)
+    loss, grads = nnx.value_and_grad(loss_fn)(model)
 
-    # Sum gradients across devices
+    # Average loss and gradients across devices
+    loss = jax.lax.pmean(loss, axis_name="devices")
     grads = jax.lax.pmean(grads, axis_name="devices")
-    loss  = jax.lax.pmean(loss,  axis_name="devices")
 
-    updates, new_opt_state = optimizer.update(
-        eqx.filter(grads, eqx.is_array),
-        opt_state,
-        eqx.filter(model, eqx.is_array),
-    )
-    new_model = eqx.apply_updates(model, updates)
-    return (new_model, new_opt_state), loss
+    optimizer.update(grads)
+
+    _, new_state = nnx.split(optimizer)
+    return new_state, loss
 
 
-@functools.partial(jax.pmap, axis_name="devices",
-                   in_axes=(0, 0, None, 0),
-                   out_axes=0)
-def eval_step(params_and_model, batch, schedule, rng):
-    model, _ = params_and_model
-    loss = compute_loss(model, batch, schedule, rng, enable_dropout=False)
+@functools.partial(jax.pmap, axis_name="devices")
+def _eval_step(state, batch, schedule_alpha_bar, schedule_T, rng):
+    model: DiffusionTransformer = nnx.merge(_graphdef, state).model
+    schedule = _ScheduleView(schedule_alpha_bar, int(schedule_T))
+    loss = compute_loss(model, batch, schedule, rng)
     return jax.lax.pmean(loss, axis_name="devices")
 
 
-# We define optimizer at module level so it can be used inside pmap'd functions.
-# It is set in main() before calling train_step.
-optimizer: optax.GradientTransformation = None  # type: ignore[assignment]
+class _ScheduleView:
+    """Thin wrapper so schedule methods work inside jit/pmap from plain arrays."""
+
+    def __init__(self, alpha_bar, T):
+        self.alpha_bar = alpha_bar
+        self.T = T
+
+    def q_sample(self, x0, t, mask_token_id, rng):
+        from schedules import NoiseSchedule
+
+        _s = object.__new__(NoiseSchedule)
+        _s.alpha_bar = self.alpha_bar
+        _s.T = self.T
+        return _s.q_sample(x0, t, mask_token_id, rng)
+
+    def loss_weight(self, t):
+        ab = self.alpha_bar[t]
+        return ab / jnp.clip(1.0 - ab, 1e-8)
 
 
-# ---------------------------------------------------------------------------
-# Checkpoint helpers
-# ---------------------------------------------------------------------------
-
-def save_checkpoint(out_dir: str, step: int, model, opt_state, cfg: Config):
+def save_checkpoint(out_dir: str, step: int, optimizer: nnx.Optimizer, cfg: Config):
     ckpt_dir = Path(out_dir) / f"step_{step:07d}"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
-    # Save model params (from first device's replica)
-    model_single = jax.tree_util.tree_map(lambda x: x[0] if x.ndim > 0 else x, model)
+    param_state = nnx.state(optimizer.model, nnx.Param)
     with open(ckpt_dir / "model.pkl", "wb") as f:
-        pickle.dump(eqx.filter(model_single, eqx.is_array), f)
+        pickle.dump(param_state, f)
+    import dataclasses
+
     with open(ckpt_dir / "config.json", "w") as f:
-        # Serialize config (best effort for dataclasses)
-        import dataclasses
         json.dump(dataclasses.asdict(cfg), f, indent=2)
-    # Save latest pointer
     (Path(out_dir) / "latest").write_text(str(ckpt_dir))
-    print(f"[ckpt] Saved checkpoint → {ckpt_dir}")
+    print(f"[ckpt] Saved → {ckpt_dir}")
 
 
-def load_checkpoint(ckpt_path: str, model, opt_state):
-    """Load model weights from a checkpoint directory, returns updated model."""
-    ckpt_dir = Path(ckpt_path)
-    with open(ckpt_dir / "model.pkl", "rb") as f:
-        saved_params = pickle.load(f)
-    # Filter & replace arrays in model
-    model = eqx.tree_at(
-        lambda m: eqx.filter(m, eqx.is_array),
-        model,
-        saved_params,
-    )
-    print(f"[ckpt] Loaded checkpoint ← {ckpt_dir}")
-    return model, opt_state
+def load_checkpoint(ckpt_path: str, model: DiffusionTransformer):
+    with open(Path(ckpt_path) / "model.pkl", "rb") as f:
+        saved = pickle.load(f)
+    nnx.update(model, saved)
+    print(f"[ckpt] Loaded ← {ckpt_path}")
 
 
-# ---------------------------------------------------------------------------
-# Validation helper
-# ---------------------------------------------------------------------------
-
-def evaluate(model_and_opt, val_loader, schedule, n_devices, n_batches=20):
-    losses = []
-    loader_iter = iter(val_loader)
-    for _ in range(n_batches):
-        batch_np = next(loader_iter)            # (global_bs, L)
-        local_bs = batch_np.shape[0] // n_devices
-        batch_jax = jnp.array(batch_np).reshape(n_devices, local_bs, -1)
-        rng = jax.random.split(jax.random.PRNGKey(0), n_devices)  # eval: fixed rng
-        loss = eval_step(model_and_opt, batch_jax, schedule, rng)
-        losses.append(float(loss[0]))
-    return float(np.mean(losses))
-
-
-# ---------------------------------------------------------------------------
-# Sampling  (auto-regressive in diffusion time, NOT token order)
-# ---------------------------------------------------------------------------
-
-@jax.jit
+@nnx.jit
 def sample(
     model: DiffusionTransformer,
     schedule: NoiseSchedule,
@@ -253,27 +199,19 @@ def sample(
     temperature: float = 1.0,
     n_steps: int = 50,
 ) -> jax.Array:
-    """
-    Generate n_samples sequences via DDIM-style reverse diffusion.
-    Starts from fully masked xₜ and iteratively denoises.
-
-    Returns: (n_samples, seq_len) int32 token ids.
-    """
+    """Generate n_samples sequences via iterative denoising.  Returns (N, L) int32."""
     mask_id = model.cfg.mask_token_id
     T = schedule.T
 
-    # Start fully masked
     x = jnp.full((n_samples, seq_len), mask_id, dtype=jnp.int32)
-
-    # Evenly-spaced time steps  T → 0
     steps = jnp.linspace(T, 0, n_steps + 1, dtype=jnp.int32)
 
     def body(carry, i):
         x, rng = carry
-        t_cur  = jnp.full((n_samples,), steps[i],     dtype=jnp.int32)
+        t_cur = jnp.full((n_samples,), steps[i], dtype=jnp.int32)
         t_next = jnp.full((n_samples,), steps[i + 1], dtype=jnp.int32)
         rng, rng_step = jax.random.split(rng)
-        logits = model(x, t_cur, T, enable_dropout=False)  # (B, L, V)
+        logits = model(x, t_cur, T, training=False)
         x = schedule.ddim_step(logits, x, t_cur, t_next, mask_id, rng_step, temperature)
         return (x, rng), None
 
@@ -281,105 +219,115 @@ def sample(
     return x
 
 
-# ---------------------------------------------------------------------------
-# Main training loop
-# ---------------------------------------------------------------------------
+def evaluate(rep_state, val_loader, schedule, n_devices, n_batches=20):
+    losses = []
+    ab = schedule.alpha_bar
+    T_arr = jnp.array(schedule.T)
+    for _, batch_np in zip(range(n_batches), val_loader):
+        local_bs = batch_np.shape[0] // n_devices
+        batch_jax = jnp.array(batch_np).reshape(n_devices, local_bs, -1)
+        rng = jax.random.split(jax.random.PRNGKey(0), n_devices)
+        loss = _eval_step(
+            rep_state,
+            batch_jax,
+            jnp.broadcast_to(ab, (n_devices,) + ab.shape),
+            jnp.broadcast_to(T_arr, (n_devices,)),
+            rng,
+        )
+        losses.append(float(loss[0]))
+    return float(np.mean(losses))
+
 
 def main():
-    global optimizer  # set before pmap'd train_step is called
+    global _graphdef
 
-    # ── Parse config from CLI ──────────────────────────────────────────────
     cfg = tyro.cli(Config)
     validate(cfg)
 
     out_dir = Path(cfg.train.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── Devices ────────────────────────────────────────────────────────────
+    # Devices
     n_devices = jax.device_count()
     assert cfg.train.batch_size % n_devices == 0, (
-        f"batch_size ({cfg.train.batch_size}) must be divisible by n_devices ({n_devices})"
+        f"batch_size {cfg.train.batch_size} must be divisible by n_devices {n_devices}"
     )
     local_bs = cfg.train.batch_size // n_devices
-    print(f"[init] devices: {n_devices}   local batch/device: {local_bs}")
+    print(f"[init] devices: {n_devices}  local_bs: {local_bs}")
 
-    # ── Data ───────────────────────────────────────────────────────────────
-    train_loader, val_loader = make_loaders(cfg.data, cfg.train.batch_size, cfg.train.seed)
+    # Data
+    train_loader, val_loader = make_loaders(
+        cfg.data, cfg.train.batch_size, cfg.train.seed
+    )
 
-    # ── Schedule ───────────────────────────────────────────────────────────
+    # Schedule
     schedule = make_schedule(cfg.schedule)
 
-    # ── Model ──────────────────────────────────────────────────────────────
-    rng = jax.random.PRNGKey(cfg.train.seed)
-    rng, model_key = jax.random.split(rng)
-    model = DiffusionTransformer(cfg.model, model_key)
-    print(f"[init] model params: {count_params(model):,}")
+    # Model + Optimizer (NNX)
+    model = DiffusionTransformer(cfg.model, rngs=nnx.Rngs(cfg.train.seed))
+    print(f"[init] params: {count_params(model):,}")
 
-    # ── Optimizer ──────────────────────────────────────────────────────────
-    optimizer = make_optimizer(cfg.train)
-    opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
+    tx = make_optimizer(cfg.train)
+    optimizer = nnx.Optimizer(model, tx)
 
-    # ── Resume ─────────────────────────────────────────────────────────────
-    start_step = 0
+    # Resume
     if cfg.train.resume:
-        model, opt_state = load_checkpoint(cfg.train.resume, model, opt_state)
+        load_checkpoint(cfg.train.resume, model)
 
-    # ── Replicate across devices ──────────────────────────────────────────
-    model_rep    = jax.device_put_replicated(model,     jax.devices())
-    opt_state_rep = jax.device_put_replicated(opt_state, jax.devices())
-    state = (model_rep, opt_state_rep)
+    # Split optimizer (model + optax state) for pmap replication
+    _graphdef, state = nnx.split(optimizer)
+    rep_state = jax.device_put_replicated(state, jax.devices())
 
-    # ── Training loop ────────────────────────────────────────────────────
+    # Pre-broadcast schedule arrays for pmap
+    ab = schedule.alpha_bar  # (T+1,)
+    T_rep = jnp.broadcast_to(jnp.array(schedule.T), (n_devices,))
+
     loader_iter = iter(train_loader)
+    rng = jax.random.PRNGKey(cfg.train.seed)
+    log_file = open(out_dir / "log.jsonl", "a")
     t0 = time.time()
 
-    log_path = out_dir / "log.jsonl"
-    log_file = open(log_path, "a")
-
-    for step in range(start_step, cfg.train.max_steps):
-
-        # ── Batch ─────────────────────────────────────────────────────────
-        batch_np = next(loader_iter)                               # (B, L)
+    for step in range(cfg.train.max_steps):
+        # Batch: (n_devices, local_bs, L)
+        batch_np = next(loader_iter)
         batch_jax = jnp.array(batch_np).reshape(n_devices, local_bs, -1)
 
-        # ── Per-device RNG (unique per device per step) ───────────────────
+        # Per-device RNG (unique per device per step)
         rng, step_rng = jax.random.split(rng)
-        per_device_rngs = jax.random.split(step_rng, n_devices)  # (n_devices, 2)
+        dev_rngs = jax.random.split(step_rng, n_devices)
 
-        # ── Step ──────────────────────────────────────────────────────────
-        state, loss_rep = train_step(state, batch_jax, schedule, per_device_rngs)
+        # Broadcast schedule alpha_bar to per-device leading axis
+        ab_rep = jnp.broadcast_to(ab[None], (n_devices,) + ab.shape)
+
+        rep_state, loss_rep = _train_step(rep_state, batch_jax, ab_rep, T_rep, dev_rngs)
         loss = float(loss_rep[0])
 
-        # ── Logging ───────────────────────────────────────────────────────
         if step % cfg.train.log_every == 0:
             dt = (time.time() - t0) / max(1, cfg.train.log_every)
-            current_lr = lr_schedule(step, cfg.train)
+            lr = lr_schedule(step, cfg.train)
             print(
-                f"step {step:7d}/{cfg.train.max_steps}  "
-                f"loss {loss:.4f}  lr {current_lr:.2e}  "
-                f"{dt*1000:.1f}ms/step"
+                f"step {step:7d}/{cfg.train.max_steps}  loss {loss:.4f}  "
+                f"lr {lr:.2e}  {dt * 1000:.1f}ms/step"
             )
-            log_file.write(json.dumps({"step": step, "loss": loss, "lr": current_lr}) + "\n")
+            log_file.write(json.dumps({"step": step, "loss": loss, "lr": lr}) + "\n")
             log_file.flush()
             t0 = time.time()
 
-        # ── Validation ────────────────────────────────────────────────────
         if step % cfg.train.eval_every == 0 and step > 0:
-            val_loss = evaluate(state, val_loader, schedule, n_devices)
+            val_loss = evaluate(rep_state, val_loader, schedule, n_devices)
             print(f"  [val] step {step}  val_loss {val_loss:.4f}")
             log_file.write(json.dumps({"step": step, "val_loss": val_loss}) + "\n")
             log_file.flush()
 
-        # ── Checkpoint ────────────────────────────────────────────────────
         if step % cfg.train.save_every == 0 and step > 0:
-            model_single, opt_single = jax.tree_util.tree_map(
-                lambda x: x[0], state
-            )
-            save_checkpoint(str(out_dir), step, model_single, opt_single, cfg)
+            # Recover single-device optimizer to extract params for saving
+            single_state = jax.tree_util.tree_map(lambda x: x[0], rep_state)
+            single_optim = nnx.merge(_graphdef, single_state)
+            save_checkpoint(str(out_dir), step, single_optim, cfg)
 
-    # ── Final checkpoint ──────────────────────────────────────────────────
-    model_single, opt_single = jax.tree_util.tree_map(lambda x: x[0], state)
-    save_checkpoint(str(out_dir), cfg.train.max_steps, model_single, opt_single, cfg)
+    single_state = jax.tree_util.tree_map(lambda x: x[0], rep_state)
+    single_optim = nnx.merge(_graphdef, single_state)
+    save_checkpoint(str(out_dir), cfg.train.max_steps, single_optim, cfg)
     log_file.close()
     print("[done] Training complete.")
 
