@@ -28,7 +28,7 @@ class ModelConfig:
 class ScheduleConfig:
     kind: Literal["cosine", "linear", "sqrt"] = "cosine"
     T: int = 1000
-    eps: float = 1e-4  # Small offset to keep β(0) > 0 and β(T) < 1.
+    eps: float = 1e-4
 
 
 @dataclass
@@ -58,7 +58,7 @@ class TrainConfig:
     save_every: int = 5_000
     out_dir: str = "runs/default"
     resume: str = ""
-    compile: bool = False  # JIT-compile the train step with jax.jit (always True in practice, flag kept for debugging).
+    compile: bool = False
 
 
 @dataclass
