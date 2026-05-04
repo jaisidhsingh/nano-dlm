@@ -105,19 +105,18 @@ def test_dlm_overfit_batch():
         loss_per_pos = optax.softmax_cross_entropy_with_integer_labels(
             logits=logits, labels=x0
         )  # (B, L)
-        loss = jnp.where(mask, loss_per_pos, 0.0).sum() / max(n_masked, 1.0)
+        loss = jnp.where(mask, loss_per_pos, 0.0).sum() / jnp.maximum(n_masked, 1.0)
         print(loss.shape, loss.dtype)
         return loss, logits
 
     @nnx.jit
     def train_step(
         model: DiffusionTransformer,
-        x0: jax.Array,
-        xt: jax.Array,
-        t: jax.Array,
-        T: int,
+        optimizer: nnx.Optimizer,
+        batch: Tuple[jax.Array, jax.Array, jax.Array, int]
     ) -> tuple[nnx.State, optax.OptState, jax.Array]:
-        grad_fn = nnx.value_and_grad(loss_fn)
+        x0, xt, t, T = batch
+        grad_fn = nnx.value_and_grad(loss_fn, has_aux=True)
         (loss, logits), grads = grad_fn(model, x0, xt, (t, T))
         optimizer.update(model, grads)
         return loss, logits
@@ -133,8 +132,10 @@ def test_dlm_overfit_batch():
     loss_initial = None
     loss_final = None
 
+    batch = (x0, xt, t, T)
+
     for step in range(STEPS):
-        loss, logits = train_step(model, x0, xt, t, T)
+        loss, logits = train_step(model, optimizer, batch)
 
         if step == 0:
             loss_initial = loss
