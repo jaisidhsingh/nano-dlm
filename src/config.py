@@ -1,17 +1,19 @@
 from __future__ import annotations
+
 from dataclasses import dataclass, field
 from typing import Literal
 
 
 @dataclass
 class ModelConfig:
-    vocab_size: int = 50257
-    seq_len: int = 128
+    init_seed: int = 123
+    vocab_size: int = 50304
+    seq_len: int = 1024
     n_layers: int = 6
     n_heads: int = 8
-    d_model: int = 512
+    d_model: int = 768
     d_ff: int = 2048
-    dropout: float = 0.1
+    dropout: float = 0.0
     mask_token_id: int = 50256
 
     @property
@@ -33,11 +35,11 @@ class ScheduleConfig:
 
 @dataclass
 class DataConfig:
-    dataset: Literal["wikitext103", "text8", "custom"] = "wikitext103"
-    data_path: str = ""
-    seq_len: int = 128
-    num_workers: int = 4
-    cache_dir: str = ".cache"
+    trainset_path: str = "/fast/jsingh/data/openwebtext/tokenized-9b-gpt2/train"
+    validset_path: str = "/fast/jsingh/data/openwebtext/tokenized-9b-gpt2/val"
+    shuffle_seed: int = 123
+    seq_len: int = 1024
+    num_workers: int = 8
 
 
 @dataclass

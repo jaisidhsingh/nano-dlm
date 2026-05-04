@@ -17,12 +17,16 @@ Key design choices
 """
 
 from __future__ import annotations
+
 import math
+from typing import Optional
+
+import flax.nnx as nnx
 import jax
 import jax.numpy as jnp
-import flax.nnx as nnx
-from typing import Optional
-from config import ModelConfig
+from flax.nnx.graph import state
+
+from src.config import ModelConfig
 
 
 def sinusoidal_embedding(t: jax.Array, dim: int) -> jax.Array:
@@ -77,7 +81,7 @@ class MultiHeadAttention(nnx.Module):
         assert d_model % n_heads == 0
         self.n_heads = n_heads
         self.head_dim = d_model // n_heads
-        self.dropout_p = dropout
+        self.dropout = nnx.Dropout(dropout, rngs=rngs)
         self.q_proj = nnx.Linear(d_model, d_model, use_bias=False, rngs=rngs)
         self.k_proj = nnx.Linear(d_model, d_model, use_bias=False, rngs=rngs)
         self.v_proj = nnx.Linear(d_model, d_model, use_bias=False, rngs=rngs)
@@ -88,7 +92,6 @@ class MultiHeadAttention(nnx.Module):
         x: jax.Array,  # (B, L, D)
         freqs: jax.Array,  # (L, head_dim//2)
         training: bool = False,
-        rng: Optional[jax.Array] = None,
     ) -> jax.Array:
         B, L, D = x.shape
         H, Dh = self.n_heads, self.head_dim
@@ -106,8 +109,8 @@ class MultiHeadAttention(nnx.Module):
         weights = jnp.einsum("bhqd,bhkd->bhqk", q, k) / scale  # (B, H, L, L)
         weights = jax.nn.softmax(weights, axis=-1)
 
-        if training and rng is not None:
-            weights = jax.nn.dropout(weights, rate=self.dropout_p, key=rng)
+        if training:
+            weights = self.dropout(weights)
 
         out = jnp.einsum("bhqk,bhkd->bhqd", weights, v)  # (B, H, L, Dh)
         out = out.transpose(0, 2, 1, 3).reshape(B, L, D)  # (B, L, D)
@@ -118,17 +121,16 @@ class FFN(nnx.Module):
     def __init__(self, d_model: int, d_ff: int, dropout: float, rngs: nnx.Rngs):
         self.fc1 = nnx.Linear(d_model, d_ff, use_bias=True, rngs=rngs)
         self.fc2 = nnx.Linear(d_ff, d_model, use_bias=True, rngs=rngs)
-        self.dropout_p = dropout
+        self.dropout = nnx.Dropout(dropout, rngs=rngs)
 
     def __call__(
         self,
         x: jax.Array,
         training: bool = False,
-        rng: Optional[jax.Array] = None,
     ) -> jax.Array:
         x = jax.nn.gelu(self.fc1(x), approximate=True)
-        if training and rng is not None:
-            x = jax.nn.dropout(x, rate=self.dropout_p, key=rng)
+        if training:
+            x = self.dropout(x)
         return self.fc2(x)
 
 
@@ -145,11 +147,9 @@ class TransformerBlock(nnx.Module):
         time_emb: jax.Array,  # (B, time_emb_dim)
         freqs: jax.Array,  # (L, head_dim//2)
         training: bool = False,
-        rng: Optional[jax.Array] = None,
     ) -> jax.Array:
-        rng_a, rng_f = jax.random.split(rng) if rng is not None else (None, None)
-        x = x + self.attn(self.adaln1(x, time_emb), freqs, training=training, rng=rng_a)
-        x = x + self.ffn(self.adaln2(x, time_emb), training=training, rng=rng_f)
+        x = x + self.attn(self.adaln1(x, time_emb), freqs, training=training)
+        x = x + self.ffn(self.adaln2(x, time_emb), training=training)
         return x
 
 
@@ -164,13 +164,25 @@ class DiffusionTransformer(nnx.Module):
         self.time_fc1 = nnx.Linear(cfg.d_model, self.time_emb_dim, rngs=rngs)
         self.time_fc2 = nnx.Linear(self.time_emb_dim, self.time_emb_dim, rngs=rngs)
 
-        self.blocks = [
-            TransformerBlock(cfg, self.time_emb_dim, rngs) for _ in range(cfg.n_layers)
-        ]
+        self.blocks = nnx.List(
+            [
+                TransformerBlock(cfg, self.time_emb_dim, rngs)
+                for _ in range(cfg.n_layers)
+            ]
+        )
         self.final_norm = nnx.LayerNorm(cfg.d_model, rngs=rngs)
         self.lm_head = nnx.Linear(
             cfg.d_model, cfg.vocab_size, use_bias=False, rngs=rngs
         )
+
+    def count_params(self, nonembed: bool = True) -> int:
+        state = nnx.state(self, nnx.Param)
+        total = sum(x.size for x in jax.tree_util.tree_leaves(state))
+        if nonembed:
+            embed_state = nnx.state(self.token_emb, nnx.Param)
+            embed_params = sum(x.size for x in jax.tree_util.tree_leaves(embed_state))
+            total -= embed_params
+        return total
 
     def __call__(
         self,
@@ -189,20 +201,14 @@ class DiffusionTransformer(nnx.Module):
 
         freqs = rope_freqs(L, self.cfg.head_dim)  # (L, Dh/2)
 
-        block_rngs = (
-            jax.random.split(rng, len(self.blocks))
-            if (rng is not None and training)
-            else [None] * len(self.blocks)
-        )
-        for block, bkey in zip(self.blocks, block_rngs):
-            x = block(x, t_emb, freqs, training=training, rng=bkey)
+        # block_rngs = (
+        #     jax.random.split(rng, len(self.blocks))
+        #     if (rng is not None and training)
+        #     else [None] * len(self.blocks)
+        # )
+        for block in self.blocks:
+            x = block(x, t_emb, freqs, training=training)
 
         x = self.final_norm(x)  # (B, L, D)
         logits = self.lm_head(x)  # (B, L, V)
         return logits
-
-
-def count_params(model: DiffusionTransformer) -> int:
-    """Total number of trainable parameters."""
-    state = nnx.state(model, nnx.Param)
-    return sum(x.size for x in jax.tree_util.tree_leaves(state))

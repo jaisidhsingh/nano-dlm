@@ -17,15 +17,18 @@ All schedules return:
 """
 
 from __future__ import annotations
+
+from functools import partial
+
 import jax
 import jax.numpy as jnp
-from functools import partial
-from config import ScheduleConfig
 
+from src.config import ScheduleConfig
 
 # ---------------------------------------------------------------------------
 # Core schedule functions  (all return shape [T+1])
 # ---------------------------------------------------------------------------
+
 
 def _cosine_alpha_bar(T: int, eps: float = 1e-4) -> jax.Array:
     """Cosine schedule for the *unmasked* fraction ᾱₜ."""
@@ -57,12 +60,13 @@ def _sqrt_alpha_bar(T: int, eps: float = 1e-4) -> jax.Array:
 # Schedule builder
 # ---------------------------------------------------------------------------
 
+
 def make_schedule(cfg: ScheduleConfig) -> "NoiseSchedule":
     """Factory: build and return a NoiseSchedule from config."""
     builders = {
         "cosine": _cosine_alpha_bar,
         "linear": _linear_alpha_bar,
-        "sqrt":   _sqrt_alpha_bar,
+        "sqrt": _sqrt_alpha_bar,
     }
     fn = builders[cfg.kind]
     alpha_bar = fn(cfg.T, cfg.eps)
@@ -72,6 +76,7 @@ def make_schedule(cfg: ScheduleConfig) -> "NoiseSchedule":
 # ---------------------------------------------------------------------------
 # NoiseSchedule dataclass  (pure-JAX, no Python state after construction)
 # ---------------------------------------------------------------------------
+
 
 class NoiseSchedule:
     """
@@ -96,8 +101,8 @@ class NoiseSchedule:
 
     def q_sample(
         self,
-        x0: jax.Array,           # (B, L)  integer token ids
-        t: jax.Array,            # (B,)    diffusion time steps  ∈ {1, …, T}
+        x0: jax.Array,  # (B, L)  integer token ids
+        t: jax.Array,  # (B,)    diffusion time steps  ∈ {1, …, T}
         mask_token_id: int,
         rng: jax.Array,
     ) -> jax.Array:
@@ -106,8 +111,8 @@ class NoiseSchedule:
         Each position is independently replaced by [MASK] with prob (1-ᾱₜ).
         """
         B, L = x0.shape
-        alpha_bar_t = self.alpha_bar[t]          # (B,)
-        alpha_bar_t = alpha_bar_t[:, None]       # (B, 1)  → broadcast over L
+        alpha_bar_t = self.alpha_bar[t]  # (B,)
+        alpha_bar_t = alpha_bar_t[:, None]  # (B, 1)  → broadcast over L
 
         # Bernoulli mask: 1 = keep original, 0 = mask
         keep = jax.random.bernoulli(rng, alpha_bar_t, shape=(B, L))  # (B, L)
@@ -120,9 +125,9 @@ class NoiseSchedule:
 
     def posterior_sample(
         self,
-        x0: jax.Array,           # (B, L)  integer token ids
-        xt: jax.Array,           # (B, L)  noisy tokens at step t
-        t: jax.Array,            # (B,)    current step
+        x0: jax.Array,  # (B, L)  integer token ids
+        xt: jax.Array,  # (B, L)  noisy tokens at step t
+        t: jax.Array,  # (B,)    current step
         mask_token_id: int,
         rng: jax.Array,
     ) -> jax.Array:
@@ -137,14 +142,14 @@ class NoiseSchedule:
 
         This posterior is *exact* for absorbing diffusion.
         """
-        alpha_bar_t   = self.alpha_bar[t]              # (B,)
+        alpha_bar_t = self.alpha_bar[t]  # (B,)
         alpha_bar_tm1 = self.alpha_bar[jnp.maximum(t - 1, 0)]  # (B,)
 
         # Probability of unmasking a currently masked token
         p_unmask = (alpha_bar_tm1 - alpha_bar_t) / jnp.clip(1.0 - alpha_bar_t, 1e-8)
         p_unmask = jnp.clip(p_unmask, 0.0, 1.0)[:, None]  # (B, 1)
 
-        is_masked = (xt == mask_token_id)  # (B, L)
+        is_masked = xt == mask_token_id  # (B, L)
         # Draw Bernoulli: unmask with prob p_unmask
         unmask = jax.random.bernoulli(rng, p_unmask, shape=xt.shape)  # (B, L)
 
@@ -171,10 +176,10 @@ class NoiseSchedule:
 
     def ddim_step(
         self,
-        logits_x0: jax.Array,    # (B, L, V)  model output (log-probs over vocab)
-        xt: jax.Array,           # (B, L)
-        t: jax.Array,            # (B,)  scalar per sample
-        t_next: jax.Array,       # (B,)  next (smaller) step
+        logits_x0: jax.Array,  # (B, L, V)  model output (log-probs over vocab)
+        xt: jax.Array,  # (B, L)
+        t: jax.Array,  # (B,)  scalar per sample
+        t_next: jax.Array,  # (B,)  next (smaller) step
         mask_token_id: int,
         rng: jax.Array,
         temperature: float = 1.0,
@@ -189,11 +194,13 @@ class NoiseSchedule:
         rng_sample, rng_q = jax.random.split(rng)
 
         # Gumbel-max trick for sampling from logits
-        gumbel = -jnp.log(-jnp.log(jax.random.uniform(rng_sample, logits_x0.shape) + 1e-10) + 1e-10)
+        gumbel = -jnp.log(
+            -jnp.log(jax.random.uniform(rng_sample, logits_x0.shape) + 1e-10) + 1e-10
+        )
         x0_pred = jnp.argmax(logits_x0 / temperature + gumbel, axis=-1)  # (B, L)
 
         # Only update masked positions
-        is_masked = (xt == mask_token_id)
+        is_masked = xt == mask_token_id
         x0_for_step = jnp.where(is_masked, x0_pred, xt)
 
         # Re-corrupt to t_next

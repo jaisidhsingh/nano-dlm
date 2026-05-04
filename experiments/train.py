@@ -41,10 +41,10 @@ import optax
 import flax.nnx as nnx
 import tyro
 
-from config import Config, validate
-from schedules import make_schedule, NoiseSchedule
-from model import DiffusionTransformer, count_params
-from data import make_loaders
+from src.config import Config, validate
+from src.schedules import make_schedule, NoiseSchedule
+from src.model import DiffusionTransformer, count_params
+from src.data import make_loaders
 
 
 def compute_loss(
