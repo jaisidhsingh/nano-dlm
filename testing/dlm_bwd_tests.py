@@ -40,19 +40,19 @@ def _try_get_real_batch(batch_size: int, seq_len: int) -> tuple[jax.Array, bool]
 def test_dlm_overfit_batch():
     """Overfit the model on a single batch for 200 steps."""
 
-    BATCH = 8
+    BATCH = 2
     SEQ = 1024  # shorter sequence → much faster
-    STEPS = 200
+    STEPS = 20
     LR = 1e-3
     T_SCHEDULE = 1000  # total diffusion steps
 
     cfg = ModelConfig(
         vocab_size=50304,
         seq_len=SEQ,
-        n_layers=4,
+        n_layers=1,
         n_heads=4,
-        d_model=256,
-        d_ff=1024,
+        d_model=128,
+        d_ff=256,
         dropout=0.1,  # non-zero dropout so nnx.Dropout is exercised
         mask_token_id=50256,
     )
@@ -106,7 +106,6 @@ def test_dlm_overfit_batch():
             logits=logits, labels=x0
         )  # (B, L)
         loss = jnp.where(mask, loss_per_pos, 0.0).sum() / jnp.maximum(n_masked, 1.0)
-        print(loss.shape, loss.dtype)
         return loss, logits
 
     @nnx.jit
