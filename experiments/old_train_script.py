@@ -86,6 +86,11 @@ def lr_schedule(step: int, cfg) -> float:
     return cfg.min_lr + coeff * (cfg.lr - cfg.min_lr)
 
 
+# ---------------------------------------------------------------------------
+# pmap-compatible train / eval steps
+# ---------------------------------------------------------------------------
+
+# graphdef is captured as a Python closure (static, same on all devices)
 _graphdef = None
 
 
