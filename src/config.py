@@ -14,7 +14,7 @@ class ModelConfig:
     d_model: int = 768
     d_ff: int = 2048
     dropout: float = 0.0
-    mask_token_id: int = 50256
+    mask_token_id: int = 50257
 
     @property
     def head_dim(self) -> int:

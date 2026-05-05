@@ -8,10 +8,10 @@ from src.config import DataConfig
 
 
 class Tokenizer:
-    def __init__(self, tokenizer_type: str):
+    def __init__(self, tokenizer_id: str = "gpt2"):
         import tiktoken
 
-        self._tok = tiktoken.get_encoding("gtp2")
+        self._tok = tiktoken.get_encoding(tokenizer_id)
 
     def encode(self, text: str) -> jnp.ndarray:
         return jnp.array(self._tok(text), dtype=jnp.int64)
@@ -21,6 +21,9 @@ class Tokenizer:
 
     def __call__(self, text: str) -> jnp.ndarray:
         return self.encode(text)
+
+    def __len__(self):
+        return len(self._tok)
 
 
 def get_dataloaders(
