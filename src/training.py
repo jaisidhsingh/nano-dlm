@@ -41,12 +41,22 @@ def train_step(
     return loss, logits
 
 
+@nnx.jit
+def val_step(
+    model: DiffusionTransformer,
+    batch: tp.Tuple[jax.Array, jax.Array, jax.Array, int],
+) -> tp.Tuple[jax.Array, jax.Array]:
+    x0, xt, t, T = batch
+    loss, logits = loss_fn(model, x0, xt, (t, T))
+    return loss, logits
+
+
 def get_lr_schedule(cfg: TrainConfig) -> optax.Schedule:
     schedule_fn = None
     if cfg.lr_schedule == "none":
         schedule_fn = cfg.lr
 
-    if cfg.lr_schedule == "warmup_cosine":
+    elif cfg.lr_schedule == "warmup_cosine":
         schedule_fn = optax.join_schedules(
             schedules=[
                 optax.linear_schedule(0.0, cfg.lr, cfg.warmup_steps),

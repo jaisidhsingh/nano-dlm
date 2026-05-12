@@ -2,6 +2,27 @@ import os
 import pickle
 
 import flax.nnx as nnx
+import wandb
+
+from src.config import ExperimentConfig
+
+
+def log_metrics(cfg: ExperimentConfig, per_step_logs: dict, step: int) -> None:
+    if cfg.use_wandb:
+        """
+        We want to log
+        - step
+        - micro_step
+        - lr
+        - tokens
+        - train_loss
+        - train_loss_batch_avged
+        - train_ppl
+        - val_loss
+        - val_ppl
+        - avg_tokens_masked_in_batch
+        """
+        wandb.log(per_step_logs, step=step)
 
 
 def save_checkpoint(out_dir: str, step: int, optimizer: nnx.Optimizer, cfg: Config):
@@ -56,20 +77,20 @@ def sample(
     return x
 
 
-def evaluate(rep_state, val_loader, schedule, n_devices, n_batches=20):
-    losses = []
-    ab = schedule.alpha_bar
-    T_arr = jnp.array(schedule.T)
-    for _, batch_np in zip(range(n_batches), val_loader):
-        local_bs = batch_np.shape[0] // n_devices
-        batch_jax = jnp.array(batch_np).reshape(n_devices, local_bs, -1)
-        rng = jax.random.split(jax.random.PRNGKey(0), n_devices)
-        loss = _eval_step(
-            rep_state,
-            batch_jax,
-            jnp.broadcast_to(ab, (n_devices,) + ab.shape),
-            jnp.broadcast_to(T_arr, (n_devices,)),
-            rng,
-        )
-        losses.append(float(loss[0]))
-    return float(np.mean(losses))
+# def evaluate(rep_state, val_loader, schedule, n_devices, n_batches=20):
+#     losses = []
+#     ab = schedule.alpha_bar
+#     T_arr = jnp.array(schedule.T)
+#     for _, batch_np in zip(range(n_batches), val_loader):
+#         local_bs = batch_np.shape[0] // n_devices
+#         batch_jax = jnp.array(batch_np).reshape(n_devices, local_bs, -1)
+#         rng = jax.random.split(jax.random.PRNGKey(0), n_devices)
+#         loss = _eval_step(
+#             rep_state,
+#             batch_jax,
+#             jnp.broadcast_to(ab, (n_devices,) + ab.shape),
+#             jnp.broadcast_to(T_arr, (n_devices,)),
+#             rng,
+#         )
+#         losses.append(float(loss[0]))
+#     return float(np.mean(losses))

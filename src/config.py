@@ -9,11 +9,11 @@ class ModelConfig:
     init_seed: int = 123
     vocab_size: int = 50304
     seq_len: int = 1024
-    n_layers: int = 2
-    n_heads: int = 4
-    d_model: int = 64
-    d_ff: int = 256
-    dropout: float = 0.1
+    n_layers: int = 8
+    n_heads: int = 8
+    d_model: int = 256
+    d_ff: int = 1024
+    dropout: float = 0.0
     mask_token_id: int = 50257
 
     @property
@@ -45,9 +45,9 @@ class DataConfig:
 @dataclass
 class TrainConfig:
     seed: int = 123
-    batch_size: int = 8
-    grad_acc_steps: int = 2
-    max_steps: int = 100
+    batch_size: int = 32
+    grad_acc_steps: int = 8
+    max_steps: int = 6400
 
     optimizer: str = "adamw"
     beta1: float = 0.9
@@ -55,19 +55,26 @@ class TrainConfig:
     weight_decay: float = 0.1
     eps: float = 1e-8
 
-    lr: float = 3e-4
+    lr: float = 2e-2
     min_lr: float = 1e-5
-    lr_schedule: str = "linear"
+    lr_schedule: str = "warmup_cosine"
     warmup_steps: int = 20
     cooldown_start_steps: int = 2000
     clip_grad_norm: float = 1.0
 
+
+@dataclass
+class ExperimentConfig:
+    run_name: str = "single_gpu_test"
+    project_name: str = "nano-dlm"
+    use_wandb: bool = False
+
     log_every: int = 50
-    eval_every: int = 20
-    save_every: int = 20
+    eval_every: int = 50
+    # save_every: int = 50
+
     out_dir: str = "runs/default"
     resume: str = ""
-    compile: bool = False
 
 
 @dataclass
@@ -76,6 +83,7 @@ class Config:
     schedule: ScheduleConfig = field(default_factory=ScheduleConfig)
     data: DataConfig = field(default_factory=DataConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
+    exp: ExperimentConfig = field(default_factory=ExperimentConfig)
 
 
 def validate(cfg: Config) -> None:

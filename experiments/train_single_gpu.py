@@ -1,15 +1,14 @@
 from __future__ import annotations
 
-# import typing as tp
+import json
+
 import flax.nnx as nnx
 import jax
-
-# import jax.numpy as jnp
-# import optax
+import jax.numpy as jnp
 import tyro
 from src.model import DiffusionTransformer
 from src.schedules import make_schedule
-from src.training import init_optimizer_alg, train_step
+from src.training import init_optimizer_alg, train_step, val_step
 from tqdm import tqdm
 
 from src.config import Config
@@ -37,6 +36,8 @@ def main(cfg: Config):
     T = noise_schedule.T
 
     bar = tqdm(total=cfg.train.max_steps)
+    logs = {"train": {}, "val": {}}
+
     for step in range(cfg.train.max_steps):
         x0 = next(train_loader)
 
@@ -46,15 +47,28 @@ def main(cfg: Config):
         )  # random per-sample steps
         xt = noise_schedule.q_sample(x0, t, cfg.model.mask_token_id, rng_mask)
 
-        # mask_pct = (xt == cfg.model.mask_token_id).mean() * 100
+        mask_pct = (xt == cfg.model.mask_token_id).mean() * 100
 
         batch = (x0, xt, t, T)
-        loss, logits = train_step(model, optimizer, batch)
+        train_loss, train_logits = train_step(model, optimizer, batch)
+        logs["train"][step] = {
+            "loss": train_loss.item(),
+            "ppl": jnp.exp(train_loss).item(),
+        }
+
+        if step % cfg.exp.eval_every == 0:
+            val_loss, val_logits = val_step(model, batch)
+            logs["val"][step] = {
+                "loss": val_loss.item(),
+                "ppl": jnp.exp(val_loss).item(),
+            }
 
         bar.update(1)
-        bar.set_postfix({"loss": loss})
+        bar.set_postfix({"train_loss": train_loss})
 
     bar.close()
+    with open("/fast/jsingh/nano-dlm_single_gpu_42M_test_run.json", "w") as f:
+        json.dump(logs, f)
 
 
 if __name__ == "__main__":
