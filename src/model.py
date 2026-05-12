@@ -1,21 +1,3 @@
-"""
-model.py — Transformer denoiser for nano-dlm.
-Built with flax.nnx (the new, object-oriented Flax API).
-
-Architecture: bidirectional Transformer encoder (BERT-style) conditioned on
-diffusion time t via Adaptive Layer Norm (AdaLN).  Predicts clean-token logits
-(predict-x₀ parameterisation) from noisy tokens xₜ.
-
-Key design choices
-──────────────────
-• flax.nnx modules throughout (nnx.Linear, nnx.Embed, nnx.LayerNorm).
-• nnx.Linear handles any leading batch dims natively — no jax.vmap wrappers.
-• Dropout via jax.nn.dropout with explicit rng keys (avoids nnx.Dropout RNG
-  complications when replicating state across devices with pmap).
-• RoPE positional encoding — no learned position embeddings.
-• AdaLN time conditioning — scale+shift injected per Transformer block.
-"""
-
 from __future__ import annotations
 
 import math
@@ -30,7 +12,6 @@ from src.config import ModelConfig
 
 
 def sinusoidal_embedding(t: jax.Array, dim: int) -> jax.Array:
-    """Sinusoidal time embedding.  t : (B,) float ∈ [0,1] → (B, dim)."""
     half = dim // 2
     freqs = jnp.exp(-math.log(10000) * jnp.arange(half) / half)
     args = t[:, None] * freqs[None, :]
@@ -41,7 +22,6 @@ def sinusoidal_embedding(t: jax.Array, dim: int) -> jax.Array:
 
 
 def rope_freqs(seq_len: int, head_dim: int, base: int = 10_000) -> jax.Array:
-    """Pre-compute RoPE rotation frequencies.  Returns (seq_len, head_dim//2)."""
     half = head_dim // 2
     theta = 1.0 / (base ** (jnp.arange(half, dtype=jnp.float32) / half))
     pos = jnp.arange(seq_len, dtype=jnp.float32)
@@ -49,7 +29,6 @@ def rope_freqs(seq_len: int, head_dim: int, base: int = 10_000) -> jax.Array:
 
 
 def apply_rope(x: jax.Array, freqs: jax.Array) -> jax.Array:
-    """Apply RoPE.  x: (B, H, L, D)  freqs: (L, D/2) → (B, H, L, D)."""
     half = x.shape[-1] // 2
     x1, x2 = x[..., :half], x[..., half:]
     cos_ = jnp.cos(freqs)[None, None]  # (1, 1, L, D/2)
@@ -58,8 +37,6 @@ def apply_rope(x: jax.Array, freqs: jax.Array) -> jax.Array:
 
 
 class AdaLN(nnx.Module):
-    """LayerNorm whose scale+shift are predicted from the time embedding."""
-
     def __init__(self, d_model: int, time_emb_dim: int, rngs: nnx.Rngs):
         self.norm = nnx.LayerNorm(d_model, rngs=rngs)
         # projects time_emb → (γ, β), each of size d_model
