@@ -4,8 +4,9 @@ import flax.nnx as nnx
 import jax
 import jax.numpy as jnp
 import optax
-
 from src.model import DiffusionTransformer
+
+from src.config import TrainConfig
 
 
 def loss_fn(
@@ -13,7 +14,7 @@ def loss_fn(
     x0: jax.Array,
     xt: jax.Array,
     times: tp.Tuple[jax.Array, int],
-) -> jax.Array:
+) -> tp.Tuple[jax.Array, jax.Array]:
     t, T = times
     logits = model(xt, t, T, training=True)  # (B, L, V)
 
@@ -40,24 +41,83 @@ def train_step(
     return loss, logits
 
 
-def make_optimizer(cfg) -> optax.GradientTransformation:
-    schedule_fn = optax.join_schedules(
-        schedules=[
-            optax.linear_schedule(0.0, cfg.lr, cfg.warmup_steps),
-            optax.cosine_decay_schedule(
-                cfg.lr, cfg.max_steps - cfg.warmup_steps, alpha=cfg.min_lr / cfg.lr
-            ),
-        ],
-        boundaries=[cfg.warmup_steps],
+def get_lr_schedule(cfg: TrainConfig) -> optax.Schedule:
+    schedule_fn = None
+    if cfg.lr_schedule == "none":
+        schedule_fn = cfg.lr
+
+    if cfg.lr_schedule == "warmup_cosine":
+        schedule_fn = optax.join_schedules(
+            schedules=[
+                optax.linear_schedule(0.0, cfg.lr, cfg.warmup_steps),
+                optax.cosine_decay_schedule(
+                    cfg.lr, cfg.max_steps - cfg.warmup_steps, alpha=cfg.min_lr / cfg.lr
+                ),
+            ],
+            boundaries=[cfg.warmup_steps],
+        )
+    elif cfg.lr_schedule == "wsd":
+        schedule_fn = optax.join_schedules(
+            schedules=[
+                optax.linear_schedule(0.0, cfg.lr, cfg.warmup_steps),
+                optax.linear_schedule(
+                    cfg.lr, cfg.lr, cfg.cooldown_start_steps - cfg.warmup_steps
+                ),
+                optax.linear_schedule(
+                    cfg.lr, cfg.min_lr, cfg.max_steps - cfg.cooldown_start_steps
+                ),
+            ],
+            boundaries=[cfg.warmup_steps, cfg.cooldown_start_steps],
+        )
+    elif cfg.lr_schedule == "warmup_constant":
+        schedule_fn = optax.join_schedules(
+            schedules=[
+                optax.linear_schedule(0.0, cfg.lr, cfg.warmup_steps),
+                optax.linear_schedule(cfg.lr, cfg.lr, cfg.max_steps - cfg.warmup_steps),
+            ],
+            boundaries=[cfg.warmup_steps],
+        )
+    else:
+        raise NotImplementedError(
+            "The kind of learning schedule specified is not implemented in `src/training.py`"
+        )
+    return schedule_fn
+
+
+def get_optimizer_kwargs(cfg: TrainConfig):
+    kwargs = {}
+    if cfg.optimizer == "adamw":
+        kwargs = {
+            "b1": cfg.beta1,
+            "b2": cfg.beta2,
+            "eps": getattr(cfg, "eps", 1e-8),
+        }
+    else:
+        raise NotImplementedError(
+            "The kind of optimizer specified is not implemented in `src/training.py`"
+        )
+    return kwargs
+
+
+def init_optimizer_alg(
+    cfg: TrainConfig,
+) -> tp.Union[optax.GradientTransformation, optax.MultiSteps]:
+    schedule_fn = get_lr_schedule(cfg)
+    optimizer_kwargs = get_optimizer_kwargs(cfg)
+    optimizer_ref = (
+        getattr(optax, cfg.optimizer)
+        if cfg.optimizer != "muon"
+        else getattr(optax.contrib, cfg.optimizer)
     )
-    return optax.chain(
+
+    base_opt_alg = optax.chain(
         optax.clip_by_global_norm(cfg.clip_grad_norm)
         if cfg.clip_grad_norm > 0
         else optax.identity(),
-        optax.adamw(
-            learning_rate=schedule_fn,
-            b1=cfg.beta1,
-            b2=cfg.beta2,
-            weight_decay=cfg.weight_decay,
+        optimizer_ref(
+            learning_rate=schedule_fn, weight_decay=cfg.weight_decay, **optimizer_kwargs
         ),
     )
+    if cfg.grad_acc_steps > 1:
+        return optax.MultiSteps(base_opt_alg, every_k_schedule=cfg.grad_acc_steps)
+    return base_opt_alg

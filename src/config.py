@@ -9,11 +9,11 @@ class ModelConfig:
     init_seed: int = 123
     vocab_size: int = 50304
     seq_len: int = 1024
-    n_layers: int = 6
-    n_heads: int = 8
-    d_model: int = 768
-    d_ff: int = 2048
-    dropout: float = 0.0
+    n_layers: int = 2
+    n_heads: int = 4
+    d_model: int = 64
+    d_ff: int = 256
+    dropout: float = 0.1
     mask_token_id: int = 50257
 
     @property
@@ -44,20 +44,27 @@ class DataConfig:
 
 @dataclass
 class TrainConfig:
-    seed: int = 42
-    batch_size: int = 256
-    grad_accum_steps: int = 1
-    max_steps: int = 100_000
-    warmup_steps: int = 2_000
-    lr: float = 3e-4
-    min_lr: float = 1e-5
-    weight_decay: float = 0.1
+    seed: int = 123
+    batch_size: int = 8
+    grad_acc_steps: int = 2
+    max_steps: int = 100
+
+    optimizer: str = "adamw"
     beta1: float = 0.9
     beta2: float = 0.98
+    weight_decay: float = 0.1
+    eps: float = 1e-8
+
+    lr: float = 3e-4
+    min_lr: float = 1e-5
+    lr_schedule: str = "linear"
+    warmup_steps: int = 20
+    cooldown_start_steps: int = 2000
     clip_grad_norm: float = 1.0
+
     log_every: int = 50
-    eval_every: int = 1_000
-    save_every: int = 5_000
+    eval_every: int = 20
+    save_every: int = 20
     out_dir: str = "runs/default"
     resume: str = ""
     compile: bool = False
