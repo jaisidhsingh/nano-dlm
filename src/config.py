@@ -15,6 +15,8 @@ class ModelConfig:
     d_ff: int = 1024
     dropout: float = 0.0
     mask_token_id: int = 50257
+    T: int = 1000
+    time_conditioning: bool = False
 
     @property
     def head_dim(self) -> int:

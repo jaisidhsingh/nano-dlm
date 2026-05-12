@@ -6,13 +6,13 @@ import flax.nnx as nnx
 import jax
 import jax.numpy as jnp
 import tyro
-from src.model import DiffusionTransformer
-from src.schedules import make_schedule
-from src.training import init_optimizer_alg, train_step, val_step
 from tqdm import tqdm
 
 from src.config import Config
 from src.data import get_dataloaders
+from src.model import DiffusionTransformer
+from src.schedules import make_schedule
+from src.training import init_optimizer_alg, train_step, val_step
 
 
 def main(cfg: Config):
@@ -46,11 +46,11 @@ def main(cfg: Config):
             rng_t, (cfg.train.batch_size,), 1, T + 1
         )  # random per-sample steps
         xt = noise_schedule.q_sample(x0, t, cfg.model.mask_token_id, rng_mask)
-
         mask_pct = (xt == cfg.model.mask_token_id).mean() * 100
 
-        batch = (x0, xt, t, T)
+        batch = (x0, xt, t) if cfg.model.time_conditioning else (x0, xt, None)
         train_loss, train_logits = train_step(model, optimizer, batch)
+
         logs["train"][step] = {
             "loss": train_loss.item(),
             "ppl": jnp.exp(train_loss).item(),

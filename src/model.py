@@ -24,8 +24,8 @@ from typing import Optional
 import flax.nnx as nnx
 import jax
 import jax.numpy as jnp
-from flax.nnx.graph import state
 
+# from flax.nnx.graph import state
 from src.config import ModelConfig
 
 
@@ -135,42 +135,53 @@ class FFN(nnx.Module):
 
 
 class TransformerBlock(nnx.Module):
-    def __init__(self, cfg: ModelConfig, time_emb_dim: int, rngs: nnx.Rngs):
-        self.adaln1 = AdaLN(cfg.d_model, time_emb_dim, rngs)
+    def __init__(self, cfg: ModelConfig, rngs: nnx.Rngs, time_emb_dim: int = None):
+        self.time_conditioning = cfg.time_conditioning
+        if self.time_conditioning and time_emb_dim is not None:
+            self.norm1 = AdaLN(cfg.d_model, time_emb_dim, rngs)
+            self.norm2 = AdaLN(cfg.d_model, time_emb_dim, rngs)
+        else:
+            self.norm1 = nnx.RMSNorm(cfg.d_model, rngs=rngs)
+            self.norm2 = nnx.RMSNorm(cfg.d_model, rngs=rngs)
+
         self.attn = MultiHeadAttention(cfg.d_model, cfg.n_heads, cfg.dropout, rngs)
-        self.adaln2 = AdaLN(cfg.d_model, time_emb_dim, rngs)
         self.ffn = FFN(cfg.d_model, cfg.ff_dim, cfg.dropout, rngs)
 
     def __call__(
         self,
-        x: jax.Array,  # (B, L, D)
-        time_emb: jax.Array,  # (B, time_emb_dim)
-        freqs: jax.Array,  # (L, head_dim//2)
+        x: jax.Array,
+        freqs: jax.Array,
         training: bool = False,
+        time_emb: jax.Array = None,
     ) -> jax.Array:
-        x = x + self.attn(self.adaln1(x, time_emb), freqs, training=training)
-        x = x + self.ffn(self.adaln2(x, time_emb), training=training)
+        if self.time_conditioning and time_emb is not None:
+            x = x + self.attn(self.norm1(x, time_emb), freqs, training=training)
+            x = x + self.ffn(self.norm2(x, time_emb), training=training)
+        else:
+            x = x + self.attn(self.norm1(x), freqs, training=training)
+            x = x + self.ffn(self.norm2(x), training=training)
         return x
 
 
 class DiffusionTransformer(nnx.Module):
     def __init__(self, cfg: ModelConfig, rngs: nnx.Rngs):
         self.cfg = cfg
-        self.time_emb_dim = cfg.d_model * 4
-
         self.token_emb = nnx.Embed(cfg.vocab_size, cfg.d_model, rngs=rngs)
+        self.time_emb_dim = None
 
-        # Time MLP: sinusoidal(t) → Linear → SiLU → Linear
-        self.time_fc1 = nnx.Linear(cfg.d_model, self.time_emb_dim, rngs=rngs)
-        self.time_fc2 = nnx.Linear(self.time_emb_dim, self.time_emb_dim, rngs=rngs)
+        if self.cfg.time_conditioning:
+            self.time_emb_dim = cfg.d_model * 4
+            # Time MLP: sinusoidal(t) → Linear → SiLU → Linear
+            self.time_fc1 = nnx.Linear(cfg.d_model, self.time_emb_dim, rngs=rngs)
+            self.time_fc2 = nnx.Linear(self.time_emb_dim, self.time_emb_dim, rngs=rngs)
 
         self.blocks = nnx.List(
             [
-                TransformerBlock(cfg, self.time_emb_dim, rngs)
+                TransformerBlock(cfg, rngs, time_emb_dim=self.time_emb_dim)
                 for _ in range(cfg.n_layers)
             ]
         )
-        self.final_norm = nnx.LayerNorm(cfg.d_model, rngs=rngs)
+        self.final_norm = nnx.RMSNorm(cfg.d_model, rngs=rngs)
         self.lm_head = nnx.Linear(
             cfg.d_model, cfg.vocab_size, use_bias=False, rngs=rngs
         )
@@ -186,29 +197,29 @@ class DiffusionTransformer(nnx.Module):
 
     def __call__(
         self,
-        xt: jax.Array,  # (B, L)  int32 noisy tokens
-        t: jax.Array,  # (B,)    int32 diffusion steps
-        T: int,  # total diffusion steps (scalar)
+        xt: jax.Array,
+        t: jax.Array = None,
         training: bool = False,
         rng: Optional[jax.Array] = None,
     ) -> jax.Array:
-        B, L = xt.shape
-        x = self.token_emb(xt)  # (B, L, D)
+        x = self.token_emb(xt)
 
-        t_norm = t.astype(jnp.float32) / T  # (B,)
-        t_sin = sinusoidal_embedding(t_norm, self.cfg.d_model)  # (B, D)
-        t_emb = self.time_fc2(jax.nn.silu(self.time_fc1(t_sin)))  # (B, 4D)
+        if (
+            self.cfg.time_conditioning
+            and self.time_emb_dim is not None
+            and t is not None
+        ):
+            t_norm = t.astype(jnp.float32) / self.cfg.T
+            t_sin = sinusoidal_embedding(t_norm, self.cfg.d_model)
+            t_emb = self.time_fc2(jax.nn.silu(self.time_fc1(t_sin)))
+        else:
+            t_emb = None
 
-        freqs = rope_freqs(L, self.cfg.head_dim)  # (L, Dh/2)
+        freqs = rope_freqs(L, self.cfg.head_dim)
 
-        # block_rngs = (
-        #     jax.random.split(rng, len(self.blocks))
-        #     if (rng is not None and training)
-        #     else [None] * len(self.blocks)
-        # )
         for block in self.blocks:
-            x = block(x, t_emb, freqs, training=training)
+            x = block(x, freqs, training=training, time_emb=t_emb)
 
-        x = self.final_norm(x)  # (B, L, D)
-        logits = self.lm_head(x)  # (B, L, V)
+        x = self.final_norm(x)
+        logits = self.lm_head(x)
         return logits

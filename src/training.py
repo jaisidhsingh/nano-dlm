@@ -4,19 +4,15 @@ import flax.nnx as nnx
 import jax
 import jax.numpy as jnp
 import optax
-from src.model import DiffusionTransformer
 
 from src.config import TrainConfig
+from src.model import DiffusionTransformer
 
 
 def loss_fn(
-    model: DiffusionTransformer,
-    x0: jax.Array,
-    xt: jax.Array,
-    times: tp.Tuple[jax.Array, int],
+    model: DiffusionTransformer, x0: jax.Array, xt: jax.Array, t: jax.Array
 ) -> tp.Tuple[jax.Array, jax.Array]:
-    t, T = times
-    logits = model(xt, t, T, training=True)  # (B, L, V)
+    logits = model(xt, t, training=True)  # (B, L, V)
 
     mask = xt == model.cfg.mask_token_id  # (B, L)
     n_masked = mask.sum().astype(jnp.float32)
@@ -34,9 +30,9 @@ def train_step(
     optimizer: nnx.Optimizer,
     batch: tp.Tuple[jax.Array, jax.Array, jax.Array, int],
 ) -> tp.Tuple[jax.Array, jax.Array]:
-    x0, xt, t, T = batch
+    x0, xt, t = batch
     grad_fn = nnx.value_and_grad(loss_fn, has_aux=True)
-    (loss, logits), grads = grad_fn(model, x0, xt, (t, T))
+    (loss, logits), grads = grad_fn(model, x0, xt, t)
     optimizer.update(model, grads)
     return loss, logits
 
@@ -46,8 +42,8 @@ def val_step(
     model: DiffusionTransformer,
     batch: tp.Tuple[jax.Array, jax.Array, jax.Array, int],
 ) -> tp.Tuple[jax.Array, jax.Array]:
-    x0, xt, t, T = batch
-    loss, logits = loss_fn(model, x0, xt, (t, T))
+    x0, xt, t = batch
+    loss, logits = loss_fn(model, x0, xt, t)
     return loss, logits
 
 
