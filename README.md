@@ -1,5 +1,7 @@
 <div align="center">
+
 # `nano-dlm` 🧬
+
 </div>
 
 > A minimalist, extensible JAX implementation of **diffusion language models** —
@@ -77,6 +79,8 @@ python -m experiments.train_multi_gpu # same cli-args as `experiments.train_sing
 
 
 ## Architecture
+We provide the option for timestep-conditioning, although the default configuration has it switched off, following the modern implementations of diffusion language model. A brief overview of the architecture and diffusion process is given as follows.
+
 **Parameterisation:** the model predicts **x₀ directly** (not the noise).
 Loss = weighted cross-entropy at masked positions only.
 
