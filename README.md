@@ -2,6 +2,8 @@
 
 # `nano-dlm` 🧬
 
+<a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT%202.0-green.svg?style=for-the-badge" alt="License"></a>
+
 </div>
 
 > A minimalist, extensible JAX implementation of **diffusion language models** —
@@ -10,14 +12,25 @@
 Implements **masked diffusion** (MDLM) process where each training step randomly masks tokens according to a noise schedule. A bidirectional Transformer learns to predict the original tokens, i.e., the model unmasks tokens at each timestep.
 
 
-## Installation
+## 🛠️ Installation
+We need the following packages for this repository, that we recommend be installed in a dedicated `conda` environment.
 
 ```bash
+conda create -n nano-dlm python=3.12
 pip install jax jaxlib flax optax tyro tiktoken datasets orbax
 ```
 
-## Data
-We train the diffusion language model on a pre-tokenized subset of OpenWebText, very conveniently provided by Neel Nanda on huggingface. You can download and use the dataset easily by
+On the other hand, you can also use `uv`
+
+```bash
+uv init .
+source .venv/bin/activate
+uv add jax jaxlib flax optax tyorp tiktoken datasets orbax
+uv sync
+```
+
+## 📀 Data
+We train the diffusion language model on a pre-tokenized subset of `OpenWebText`, very conveniently provided by Neel Nanda on huggingface. You can download and use the dataset easily by
 
 ```python
 from datasets import load_dataset, load_from_disk
@@ -29,16 +42,10 @@ dataset.save_to_disk("your/save/path") # if you want to save to a specific locat
 dataset = load_from_disk("your/save/path")
 ```
 
-You can execute the download, saving, and splitting (train-val) of this dataset very easily by running
-
-```bash
-bash scripts/prepare_data.sh
-```
-
-Remember to specify the output path (where the datasets will be saved) in the script, and in `DataConfig` in `src/config.py`. Once that's done, you're all set!
+Remember to split the dataset into `train` and `val` splits. In our experiments, we use 1M tokens for validation.
 
 
-## Quick Start: Single GPU Training
+## ⚡️ Quick Start: Single GPU Training
 Launch a training run by simply running
 
 ```bash
@@ -68,7 +75,7 @@ python -m experiments.train_single_gpu --help
 ```
 
 
-## Multi-GPU Training
+## 🚀 Multi-GPU Training
 We create a DDP (FSDP) configuration over however many GPUs (single node) you have available via `jax.make_mesh((jax.device_count(), ), ("data",))` that shards the batch across all visible devices automatically.
 No code changes required — just make sure `batch_size` is divisible by device count:
 
@@ -78,7 +85,7 @@ python -m experiments.train_multi_gpu # same cli-args as `experiments.train_sing
 ```
 
 
-## Architecture
+## 🔍 Architecture
 We provide the option for timestep-conditioning, although the default configuration has it switched off, following the modern implementations of diffusion language model. A brief overview of the architecture and diffusion process is given as follows.
 
 **Parameterisation:** the model predicts **x₀ directly** (not the noise).
@@ -93,7 +100,7 @@ Loss = weighted cross-entropy at masked positions only.
    ancestral steps using the predicted `x̂₀`.
 
 
-## Noise Schedules
+## ⏳ Noise Schedules
 
 | Flag value | Formula | Notes |
 |---|---|---|
@@ -105,7 +112,7 @@ Loss = weighted cross-entropy at masked positions only.
 python train.py --schedule.kind sqrt --schedule.T 1000
 ```
 
-## Checkpointing & Resuming
+## 📄 Checkpointing & Resuming
 
 Every few steps, controllable via the `--exp.save_every` cli arg, we use `orbax` to checkpoint the model and optimizer states. Alongside, the logs upto that step and the full config is saved in `logs.json` and `config.json` respectively.
 
@@ -118,7 +125,7 @@ step_0050000/
 ```
 
 
-## References
+## 📚 References
 
 - [D3PM: Structured Denoising Diffusion Models in Discrete State-Spaces](https://arxiv.org/abs/2107.03006) — Austin et al. 2021
 - [Improved Diffusion Probabilistic Models](https://arxiv.org/abs/2102.09672) — Nichol & Dhariwal 2021
