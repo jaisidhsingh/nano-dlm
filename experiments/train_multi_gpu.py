@@ -53,7 +53,10 @@ def main(cfg: Config):
         logs = {"train": {}, "val": {}}
 
         for step in range(cfg.train.max_steps):
-            rng_t, rng_mask = jax.random.split(rng_noise)
+            # advance the rng key, the basis of which we sample timesteps and noise
+            # if we don't do `...split(rng_noise, 3)`, then we would have the same timesteps
+            # and corruptions for every batch
+            rng_noise, rng_t, rng_mask = jax.random.split(rng_noise, 3)
 
             x0 = jax.device_put(next(train_loader), P("data", None))
             t = jax.device_put(
