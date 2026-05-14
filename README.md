@@ -11,7 +11,7 @@
 
 Implements **masked/absorbing diffusion** (MDLM) process where each training step randomly masks tokens according to a noise schedule. A bidirectional Transformer learns to predict the original tokens, i.e., the model unmasks tokens at each timestep. Uniform diffusion is coming soon!
 
-## Why JAX 
+## 💡 Why JAX 
 1. JAX's pure function composes more elegantly with `q_sample` for diffusion training.
 2. `jax.jit` and `nnx.jit` compile the entire computation graph via XLA, which means better kernel fusion and more predictable performance. This makes them *much* stronger than `torch.compile`, which is still only a tracing-based partial compiler.
 3. Explicit `PRNG` splitting for randomness management => better reproducibility
