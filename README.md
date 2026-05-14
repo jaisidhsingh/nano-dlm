@@ -5,7 +5,7 @@
 <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT%202.0-green.svg?style=for-the-badge" alt="License"></a>
 
 > A clean & extensible ***JAX*** implementation of **diffusion language models** —
-> the spiritual successor to [nanoGPT](https://github.com/karpathy/nanoGPT) for the diffusion era.
+> [nanoGPT](https://github.com/karpathy/nanoGPT) for the diffusion era.
 
 </div>
 
