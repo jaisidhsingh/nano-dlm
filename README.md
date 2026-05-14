@@ -116,14 +116,6 @@ python train.py --schedule.kind sqrt --schedule.T 1000
 
 Every few steps, controllable via the `--exp.save_every` cli arg, we use `orbax` to checkpoint the model and optimizer states. Alongside, the logs upto that step and the full config is saved in `logs.json` and `config.json` respectively.
 
-Each checkpoint directory contains:
-```
-step_0050000/
-  logs.json       # logs upto step 0050000
-  model.pkl       # serialised Equinox parameter arrays
-  config.json     # full config snapshot for reproducibility
-```
-
 
 ## 📚 References
 
