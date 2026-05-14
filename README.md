@@ -6,11 +6,15 @@
 
 </div>
 
-> A minimalist, extensible JAX implementation of **diffusion language models** —
+> A clean & extensible ***JAX*** implementation of **diffusion language models** —
 > the spiritual successor to [nanoGPT](https://github.com/karpathy/nanoGPT) for the diffusion era.
 
-Implements **masked diffusion** (MDLM) process where each training step randomly masks tokens according to a noise schedule. A bidirectional Transformer learns to predict the original tokens, i.e., the model unmasks tokens at each timestep.
+Implements **masked/absorbing diffusion** (MDLM) process where each training step randomly masks tokens according to a noise schedule. A bidirectional Transformer learns to predict the original tokens, i.e., the model unmasks tokens at each timestep. Uniform diffusion is coming soon!
 
+## Why JAX 
+1. JAX's pure function composes more elegantly with `q_sample` for diffusion training.
+2. `jax.jit` and `nnx.jit` compile the entire computation graph via XLA, which means better kernel fusion and more predictable performance. This makes them *much* stronger than `torch.compile`, which is still only a tracing-based partial compiler.
+3. Explicit `PRNG` splitting for randomness management => better reproducibility
 
 ## 🛠️ Installation
 We need the following packages for this repository, that we recommend be installed in a dedicated `conda` environment.
@@ -25,7 +29,7 @@ On the other hand, you can also use `uv`
 ```bash
 uv init .
 source .venv/bin/activate
-uv add jax jaxlib flax optax tyorp tiktoken datasets orbax
+uv add jax jaxlib flax optax tyro tiktoken datasets orbax
 uv sync
 ```
 
@@ -42,7 +46,7 @@ dataset.save_to_disk("your/save/path") # if you want to save to a specific locat
 dataset = load_from_disk("your/save/path")
 ```
 
-Remember to split the dataset into `train` and `val` splits. In our experiments, we use 1M tokens for validation.
+Specific information on how the dataset is used can be found in `src/data.py/` and `src/config.py`. Remember to split the dataset into `train` and `val` splits. In our experiments, we use 1M tokens for validation.
 
 
 ## ⚡️ Quick Start: Single GPU Training
@@ -109,17 +113,33 @@ Loss = weighted cross-entropy at masked positions only.
 | `sqrt`   | `1 − √(t/T)` | Recommended by MDLM (Shi et al. 2024) |
 
 ```bash
-python train.py --schedule.kind sqrt --schedule.T 1000
+python -m experiments.train_single_gpu.py --schedule.kind sqrt --schedule.T 1000
 ```
 
-## 📄 Checkpointing & Resuming
+## 🔄 Checkpointing
 
-Every few steps, controllable via the `--exp.save_every` cli arg, we use `orbax` to checkpoint the model and optimizer states. Alongside, the logs upto that step and the full config is saved in `logs.json` and `config.json` respectively.
+Every few steps, controllable via the `--exp.save_every` cli arg, we use `orbax` to checkpoint the model and optimizer states. Alongside, the logs upto that step and the full config is saved in `logs.json` and `config.json` respectively. To resume from say step 100 from the example checkpoint below, set `--exp.resume=True` and provide the folder path `nano-dlm-checkpoints/step_100` to `--exp.resume_path`.
+
+```plaintext
+nano-dlm-checkpoints/
+└── step_100/
+    ├── model_state/
+    ├── optimizer_state/
+    ├── logs.json
+    └── config.json
+```
 
 
-## 📚 References
+## 🎓 Citation
 
-- [D3PM: Structured Denoising Diffusion Models in Discrete State-Spaces](https://arxiv.org/abs/2107.03006) — Austin et al. 2021
-- [Improved Diffusion Probabilistic Models](https://arxiv.org/abs/2102.09672) — Nichol & Dhariwal 2021
-- [MDLM: Masked Diffusion Language Models](https://arxiv.org/abs/2406.07524) — Shi et al. 2024
-- [nanoGPT](https://github.com/karpathy/nanoGPT) — Karpathy (inspiration)
+If you found this work useful, please cite it as follows.
+
+```bibtex
+@software{singh2026nanodlm,
+  author       = {Singh, Jaisidh},
+  title        = {nano-dlm: A Minimal JAX Implementation of Diffusion Language Models},
+  year         = {2026},
+  publisher    = {GitHub},
+  url          = {https://github.com/jaisidhsingh/nano-dlm}
+}
+```
