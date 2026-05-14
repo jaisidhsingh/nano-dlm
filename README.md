@@ -4,10 +4,11 @@
 
 <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT%202.0-green.svg?style=for-the-badge" alt="License"></a>
 
-</div>
-
 > A clean & extensible ***JAX*** implementation of **diffusion language models** —
 > the spiritual successor to [nanoGPT](https://github.com/karpathy/nanoGPT) for the diffusion era.
+
+</div>
+
 
 Implements **masked/absorbing diffusion** (MDLM) process where each training step randomly masks tokens according to a noise schedule. A bidirectional Transformer learns to predict the original tokens, i.e., the model unmasks tokens at each timestep. Uniform diffusion is coming soon!
 
