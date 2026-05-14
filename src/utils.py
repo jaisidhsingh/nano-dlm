@@ -1,50 +1,99 @@
+import json
 import os
-import pickle
+import typing as tp
+from dataclasses import asdict
 
 import flax.nnx as nnx
+import jax
+import jax.numpy as jnp
+import orbax.checkpoint as ocp
 import wandb
 
-from src.config import ExperimentConfig
+from src.config import Config, ExperimentConfig
+from src.model import DiffusionTransformer
+from src.schedules import NoiseSchedule
 
 
-def log_metrics(cfg: ExperimentConfig, per_step_logs: dict, step: int) -> None:
-    if cfg.use_wandb:
-        """
-        We want to log
-        - step
-        - micro_step
-        - lr
-        - tokens
-        - train_loss
-        - train_loss_batch_avged
-        - train_ppl
-        - val_loss
-        - val_ppl
-        - avg_tokens_masked_in_batch
-        """
-        wandb.log(per_step_logs, step=step)
+class MetricLogger:
+    def __init__(self, metrics: tp.List = ["train", "val", "params", "info"]):
+        self.metrics = metrics
+        self.data = {m: {} for m in metrics}
+        self.step_number: int = -1
+
+    def step(self, logs: dict, step: int):
+        self.step_numer = step
+
+        for m in logs.keys():
+            assert m in self.metrics, "Unsupported metric provided"
+            self.data[m][step] = {k: round(float(v), 4) for k, v in logs[m].items()}
+
+    def save_logs(self, cfg: ExperimentConfig):
+        save_folder = os.path.join(
+            cfg.out_dir, cfg.run_name, f"step_{self.step_number}"
+        )
+        os.makedirs(save_folder, exist_ok=True)
+
+        with open(os.path.join(save_folder, "logs.json"), "w") as f:
+            json.dump(self.data, f)
+
+    def log_to_wandb(self, step):
+        # always do this after `self.step(logs, step)`
+        for m in self.metrics:
+            wandb.log(
+                {f"{m}/{k}": v for k, v in self.data[m][step].items()},
+                step=step,
+            )
 
 
-def save_checkpoint(out_dir: str, step: int, optimizer: nnx.Optimizer, cfg: Config):
-    ckpt_dir = os.path.join(out_dir, f"step_{step:07d}")
-    os.makedirs(ckpt_dir, exist_ok=True)
-    param_state = nnx.state(optimizer.model, nnx.Param)
-    with open(os.path.join(ckpt_dir, "model.pkl"), "wb") as f:
-        pickle.dump(param_state, f)
-    import dataclasses
+def save_checkpoint(
+    checkpointer: ocp.StandardCheckpointer,
+    cfg: Config,
+    model: DiffusionTransformer,
+    optimizer: nnx.Optimizer,
+    metric_logger: MetricLogger,
+    step: int,
+):
+    ckpt_folder = os.path.join(cfg.exp.out_dir, f"step_{step}")
+    os.makedirs(ckpt_folder, exist_ok=True)
 
-    with open(os.path.join("config.json"), "w") as f:
-        json.dump(dataclasses.asdict(cfg), f, indent=2)
-    with open(os.path.join(out_dir, "latest"), "w") as f:
-        f.write(str(ckpt_dir))
-    print(f"[ckpt] Saved → {ckpt_dir}")
+    model_save_folder = os.path.join(ckpt_folder, "model_state")
+    os.makedirs(model_save_folder, exist_ok=True)
+
+    opt_save_folder = os.path.join(ckpt_folder, "optimizer_state")
+    os.makedirs(opt_save_folder, exist_ok=True)
+
+    graphdef, model_state = nnx.split(model)
+    checkpointer.save(model_save_folder, model_state)
+
+    _, opt_full_state = nnx.split(optimizer)
+    checkpointer.save(opt_save_folder, nnx.to_pure_dict(opt_full_state))
+
+    metric_logger.save_logs(cfg.exp)
+    with open(os.path.join(ckpt_folder, "config.json"), "w") as f:
+        json.dump(asdict(cfg), f)
 
 
-def load_checkpoint(ckpt_path: str, model: DiffusionTransformer):
-    with open(os.path.join(ckpt_path, "model.pkl"), "rb") as f:
-        saved = pickle.load(f)
-    nnx.update(model, saved)
-    print(f"[ckpt] Loaded ← {ckpt_path}")
+def load_checkpoint(cfg: Config, optimizer: nnx.Optimizer):
+    checkpointer = ocp.StandardCheckpointer()
+    ckpt_folder = cfg.exp.resume_folder
+
+    abstract_model = nnx.eval_shape(
+        lambda: DiffusionTransformer(cfg.model, rngs=nnx.Rngs(cfg.model.init_seed))
+    )
+    graphdef, abstract_state = nnx.split(abstract_model)
+    model_state = checkpointer.restore(
+        os.path.join(ckpt_folder, "model_state"), abstract_state
+    )
+    model = nnx.merge(graphdef, model_state)
+
+    restored_opt_dict = checkpointer.restore(
+        os.path.join(ckpt_folder, "optimizer_state")
+    )
+    _, opt_state = nnx.split(optimizer)
+    nnx.replace_by_pure_dict(opt_state, restored_opt_dict)
+    nnx.update(optimizer, opt_state)
+
+    return model, optimizer
 
 
 @nnx.jit
@@ -57,7 +106,6 @@ def sample(
     temperature: float = 1.0,
     n_steps: int = 50,
 ) -> jax.Array:
-    """Generate n_samples sequences via iterative denoising.  Returns (N, L) int32."""
     mask_id = model.cfg.mask_token_id
     T = schedule.T
 
@@ -69,28 +117,9 @@ def sample(
         t_cur = jnp.full((n_samples,), steps[i], dtype=jnp.int32)
         t_next = jnp.full((n_samples,), steps[i + 1], dtype=jnp.int32)
         rng, rng_step = jax.random.split(rng)
-        logits = model(x, t_cur, T, training=False)
+        logits = model(x, t_cur, training=False)
         x = schedule.ddim_step(logits, x, t_cur, t_next, mask_id, rng_step, temperature)
         return (x, rng), None
 
     (x, _), _ = jax.lax.scan(body, (x, rng), jnp.arange(n_steps))
     return x
-
-
-# def evaluate(rep_state, val_loader, schedule, n_devices, n_batches=20):
-#     losses = []
-#     ab = schedule.alpha_bar
-#     T_arr = jnp.array(schedule.T)
-#     for _, batch_np in zip(range(n_batches), val_loader):
-#         local_bs = batch_np.shape[0] // n_devices
-#         batch_jax = jnp.array(batch_np).reshape(n_devices, local_bs, -1)
-#         rng = jax.random.split(jax.random.PRNGKey(0), n_devices)
-#         loss = _eval_step(
-#             rep_state,
-#             batch_jax,
-#             jnp.broadcast_to(ab, (n_devices,) + ab.shape),
-#             jnp.broadcast_to(T_arr, (n_devices,)),
-#             rng,
-#         )
-#         losses.append(float(loss[0]))
-#     return float(np.mean(losses))

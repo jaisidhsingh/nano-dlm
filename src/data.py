@@ -3,18 +3,17 @@ from __future__ import annotations
 import typing as tp
 
 import jax.numpy as jnp
+import tiktoken
 
 from src.config import DataConfig
 
 
 class Tokenizer:
     def __init__(self, tokenizer_id: str = "gpt2"):
-        import tiktoken
-
         self._tok = tiktoken.get_encoding(tokenizer_id)
 
     def encode(self, text: str) -> jnp.ndarray:
-        return jnp.array(self._tok(text), dtype=jnp.int64)
+        return jnp.array(self._tok(text), dtype=jnp.int32)
 
     def decode(self, tokens: jnp.ndarray) -> str:
         return self._tok.decode(tokens)

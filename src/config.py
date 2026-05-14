@@ -73,10 +73,12 @@ class ExperimentConfig:
 
     log_every: int = 50
     eval_every: int = 50
-    # save_every: int = 50
+    saving: bool = True
+    save_every: int = 50
 
     out_dir: str = "runs/default"
-    resume: str = ""
+    resume: bool = False
+    resume_folder: str = ""
 
 
 @dataclass

@@ -7,11 +7,16 @@ import optax
 
 from src.config import TrainConfig
 from src.model import DiffusionTransformer
+from src.schedules import NoiseSchedule
 
 
 def loss_fn(
-    model: DiffusionTransformer, x0: jax.Array, xt: jax.Array, t: jax.Array
-) -> tp.Tuple[jax.Array, jax.Array]:
+    model: DiffusionTransformer,
+    x0: jax.Array,
+    xt: jax.Array,
+    t: tp.Union[jax.Array, None],
+    schedule: NoiseSchedule,
+) -> jax.Array:
     logits = model(xt, t, training=True)  # (B, L, V)
 
     mask = xt == model.cfg.mask_token_id  # (B, L)
@@ -20,34 +25,60 @@ def loss_fn(
     loss_per_pos = optax.softmax_cross_entropy_with_integer_labels(
         logits=logits, labels=x0
     )
-    loss = jnp.where(mask, loss_per_pos, 0.0).sum() / jnp.maximum(n_masked, 1.0)
-    return loss, logits
+    loss_weights = schedule.loss_weight(t)[:, None]
+    loss = (loss_weights * jnp.where(mask, loss_per_pos, 0.0)).sum() / jnp.maximum(
+        n_masked, 1.0
+    )
+    return loss
+
+
+@nnx.jit
+def get_grad_norm(grads) -> jax.Array:
+    grad_norm = jnp.sqrt(sum(jnp.sum(x**2) for x in jax.tree.leaves(grads)))
+    return grad_norm
+
+
+@nnx.jit
+def get_parameter_norm(model: DiffusionTransformer) -> jax.Array:
+    param_norm = jnp.sqrt(
+        sum(jnp.sum(x**2) for x in jax.tree.leaves(nnx.state(model, nnx.Param)))
+    )
+    return param_norm
 
 
 @nnx.jit
 def train_step(
     model: DiffusionTransformer,
     optimizer: nnx.Optimizer,
-    batch: tp.Tuple[jax.Array, jax.Array, jax.Array, int],
-) -> tp.Tuple[jax.Array, jax.Array]:
+    schedule: NoiseSchedule,
+    batch: tp.Tuple[jax.Array, jax.Array, jax.Array | None],
+) -> tp.Tuple[tp.Dict[str, jax.Array], tp.Dict[str, jax.Array]]:
     x0, xt, t = batch
-    grad_fn = nnx.value_and_grad(loss_fn, has_aux=True)
-    (loss, logits), grads = grad_fn(model, x0, xt, t)
+    grad_fn = nnx.value_and_grad(loss_fn)
+    loss, grads = grad_fn(model, x0, xt, t, schedule)
+
+    grad_norm = get_grad_norm(grads)
     optimizer.update(model, grads)
-    return loss, logits
+
+    parameter_norm = get_parameter_norm(model)
+    train_logs = {"loss": loss, "ppl": jnp.exp(loss)}
+    param_logs = {"parameter_norm": parameter_norm, "grad_norm": grad_norm}
+
+    return train_logs, param_logs
 
 
 @nnx.jit
 def val_step(
     model: DiffusionTransformer,
-    batch: tp.Tuple[jax.Array, jax.Array, jax.Array, int],
-) -> tp.Tuple[jax.Array, jax.Array]:
+    schedule: NoiseSchedule,
+    batch: tp.Tuple[jax.Array, jax.Array, jax.Array | None],
+) -> tp.Dict:
     x0, xt, t = batch
-    loss, logits = loss_fn(model, x0, xt, t)
-    return loss, logits
+    loss = loss_fn(model, x0, xt, t, schedule)
+    return {"loss": loss, "ppl": jnp.exp(loss)}
 
 
-def get_lr_schedule(cfg: TrainConfig) -> optax.Schedule:
+def get_lr_schedule(cfg: TrainConfig) -> tp.Union[float, optax.Schedule]:
     schedule_fn = None
     if cfg.lr_schedule == "none":
         schedule_fn = cfg.lr

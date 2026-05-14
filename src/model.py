@@ -7,7 +7,6 @@ import flax.nnx as nnx
 import jax
 import jax.numpy as jnp
 
-# from flax.nnx.graph import state
 from src.config import ModelConfig
 
 
