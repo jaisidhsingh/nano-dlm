@@ -13,7 +13,7 @@ class Tokenizer:
         self._tok = tiktoken.get_encoding(tokenizer_id)
 
     def encode(self, text: str) -> jnp.ndarray:
-        return jnp.array(self._tok(text), dtype=jnp.int32)
+        return jnp.array(self._tok.encode(text), dtype=jnp.int32)
 
     def decode(self, tokens: jnp.ndarray) -> str:
         return self._tok.decode(tokens)

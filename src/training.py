@@ -14,7 +14,7 @@ def loss_fn(
     model: DiffusionTransformer,
     x0: jax.Array,
     xt: jax.Array,
-    t: tp.Union[jax.Array, None],
+    t: jax.Array,
     schedule: NoiseSchedule,
 ) -> jax.Array:
     logits = model(xt, t, training=True)  # (B, L, V)
@@ -51,7 +51,7 @@ def train_step(
     model: DiffusionTransformer,
     optimizer: nnx.Optimizer,
     schedule: NoiseSchedule,
-    batch: tp.Tuple[jax.Array, jax.Array, jax.Array | None],
+    batch: tp.Tuple[jax.Array, jax.Array, jax.Array],
 ) -> tp.Tuple[tp.Dict[str, jax.Array], tp.Dict[str, jax.Array]]:
     x0, xt, t = batch
     grad_fn = nnx.value_and_grad(loss_fn)
@@ -71,7 +71,7 @@ def train_step(
 def val_step(
     model: DiffusionTransformer,
     schedule: NoiseSchedule,
-    batch: tp.Tuple[jax.Array, jax.Array, jax.Array | None],
+    batch: tp.Tuple[jax.Array, jax.Array, jax.Array],
 ) -> tp.Dict:
     x0, xt, t = batch
     loss = loss_fn(model, x0, xt, t, schedule)

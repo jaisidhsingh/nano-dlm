@@ -50,9 +50,7 @@ def main(cfg: Config):
     bar = tqdm(total=cfg.train.max_steps)
     metric_logger = MetricLogger()
     token_count = 0
-
-    if cfg.exp.saving:
-        checkpointer = ocp.StandardCheckpointer()
+    checkpointer = ocp.StandardCheckpointer()
 
     for step in range(cfg.train.max_steps):
         x0 = next(train_loader)
@@ -68,7 +66,7 @@ def main(cfg: Config):
         xt = noise_schedule.q_sample(x0, t, cfg.model.mask_token_id, rng_mask)
         mask_pct = (xt == cfg.model.mask_token_id).mean() * 100
 
-        batch = (x0, xt, t) if cfg.model.time_conditioning else (x0, xt, None)
+        batch = (x0, xt, t)
         train_logs, param_logs = train_step(model, optimizer, noise_schedule, batch)
 
         if step % cfg.exp.eval_every == 0:

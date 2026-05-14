@@ -1,0 +1,9 @@
+jax==0.10.0
+jaxlib==0.10.0
+flax==0.12.7
+optax==0.2.8
+tyro==1.0.13
+tiktoken==0.12.0
+datasets==4.8.5
+orbax==0.1.9
+grain==0.2.16

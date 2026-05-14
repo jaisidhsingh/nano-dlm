@@ -17,12 +17,19 @@ Implements **masked/absorbing diffusion** (MDLM) process where each training ste
 2. `jax.jit` and `nnx.jit` compile the entire computation graph via XLA, which means better kernel fusion and more predictable performance. This makes them *much* stronger than `torch.compile`, which is still only a tracing-based partial compiler.
 3. Explicit `PRNG` splitting for randomness management => better reproducibility
 
+We stick purely to the JAX ecosystem, even for data fetching and loading, via the new [`grain`](https://google-grain.readthedocs.io/en/latest/) package.
+
 ## 🛠️ Installation
 We need the following packages for this repository, that we recommend be installed in a dedicated `conda` environment.
 
 ```bash
 conda create -n nano-dlm python=3.12
-pip install jax jaxlib flax optax tyro tiktoken datasets orbax
+
+# installs latest package versions available for your system
+pip install jax jaxlib flax optax tyro tiktoken datasets orbax grain
+
+# for version specificity
+pip install -r requirements.txt
 ```
 
 On the other hand, you can also use `uv`

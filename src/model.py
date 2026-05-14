@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from typing import Optional
+import typing as tp
 
 import flax.nnx as nnx
 import jax
@@ -111,11 +111,13 @@ class FFN(nnx.Module):
 
 
 class TransformerBlock(nnx.Module):
-    def __init__(self, cfg: ModelConfig, rngs: nnx.Rngs, time_emb_dim: int = None):
+    def __init__(
+        self, cfg: ModelConfig, rngs: nnx.Rngs, time_emb_dim: tp.Union[int, None] = None
+    ):
         self.time_conditioning = cfg.time_conditioning
         if self.time_conditioning and time_emb_dim is not None:
-            self.norm1 = AdaLN(cfg.d_model, time_emb_dim, rngs)
-            self.norm2 = AdaLN(cfg.d_model, time_emb_dim, rngs)
+            self.adnorm1 = AdaLN(cfg.d_model, time_emb_dim, rngs)
+            self.adnorm2 = AdaLN(cfg.d_model, time_emb_dim, rngs)
         else:
             self.norm1 = nnx.RMSNorm(cfg.d_model, rngs=rngs)
             self.norm2 = nnx.RMSNorm(cfg.d_model, rngs=rngs)
@@ -128,11 +130,11 @@ class TransformerBlock(nnx.Module):
         x: jax.Array,
         freqs: jax.Array,
         training: bool = False,
-        time_emb: jax.Array = None,
+        time_emb: tp.Union[jax.Array, None] = None,
     ) -> jax.Array:
         if self.time_conditioning and time_emb is not None:
-            x = x + self.attn(self.norm1(x, time_emb), freqs, training=training)
-            x = x + self.ffn(self.norm2(x, time_emb), training=training)
+            x = x + self.attn(self.adnorm1(x, time_emb), freqs, training=training)
+            x = x + self.ffn(self.adnorm2(x, time_emb), training=training)
         else:
             x = x + self.attn(self.norm1(x), freqs, training=training)
             x = x + self.ffn(self.norm2(x), training=training)
@@ -174,17 +176,14 @@ class DiffusionTransformer(nnx.Module):
     def __call__(
         self,
         xt: jax.Array,
-        t: jax.Array = None,
+        t: jax.Array,
         training: bool = False,
-        rng: Optional[jax.Array] = None,
+        rng: tp.Optional[jax.Array] = None,
     ) -> jax.Array:
+        L = xt.shape[1]
         x = self.token_emb(xt)
 
-        if (
-            self.cfg.time_conditioning
-            and self.time_emb_dim is not None
-            and t is not None
-        ):
+        if self.cfg.time_conditioning and self.time_emb_dim is not None:
             t_norm = t.astype(jnp.float32) / self.cfg.T
             t_sin = sinusoidal_embedding(t_norm, self.cfg.d_model)
             t_emb = self.time_fc2(jax.nn.silu(self.time_fc1(t_sin)))
