@@ -4,6 +4,7 @@ import flax.nnx as nnx
 import jax
 import jax.numpy as jnp
 import optax
+
 from src.config import TrainConfig
 from src.model import DiffusionTransformer
 from src.schedules import NoiseSchedule
@@ -50,7 +51,7 @@ def train_step(
     optimizer: nnx.Optimizer,
     schedule: NoiseSchedule,
     inputs: tp.Dict,
-    labels: jax.Array
+    labels: jax.Array,
 ) -> tp.Tuple[tp.Dict[str, jax.Array], tp.Dict[str, jax.Array]]:
     grad_fn = nnx.value_and_grad(loss_fn)
     loss, grads = grad_fn(model, schedule, inputs, labels)
@@ -70,14 +71,10 @@ def val_step(
     model: DiffusionTransformer,
     schedule: NoiseSchedule,
     inputs: tp.Dict,
-    labels: jax.Array
+    labels: jax.Array,
 ) -> tp.Dict:
-    x0, xt, t = batch
     loss = loss_fn(model, schedule, inputs, labels)
     return {"loss": loss, "ppl": jnp.exp(loss)}
-
-
-def validation_loop(model: DiffusionTransformer):
 
 
 def get_lr_schedule(cfg: TrainConfig) -> tp.Union[float, optax.Schedule]:

@@ -8,13 +8,20 @@ import jax
 import orbax.checkpoint as ocp
 import tyro
 import wandb
+from tqdm import tqdm
+
 from src.config import Config
 from src.data import get_dataloaders
 from src.model import init_model
 from src.schedules import make_schedule
-from src.training import init_optimizer_alg, train_step, val_step
-from src.utils import MetricLogger, load_checkpoint, save_checkpoint, validation_loop
-from tqdm import tqdm
+from src.training import init_optimizer_alg, train_step
+from src.utils import (
+    MetricLogger,
+    load_checkpoint,
+    prepare_batch,
+    save_checkpoint,
+    validation_loop,
+)
 
 
 def main(cfg: Config):
@@ -45,7 +52,6 @@ def main(cfg: Config):
         # noise (token masking) schedule
         noise_schedule = make_schedule(cfg.schedule)
         rng_noise = jax.random.PRNGKey(42)
-        T = noise_schedule.T
 
         # initialize wandb run (only if set)
         if cfg.exp.use_wandb:
@@ -59,6 +65,7 @@ def main(cfg: Config):
         checkpointer = ocp.StandardCheckpointer()
 
         # training loop
+        step = 0
         for step in range(cfg.train.max_steps):
             raw_tokens = next(train_loader)
 
@@ -73,6 +80,7 @@ def main(cfg: Config):
             )
             labels = batch.pop("labels")
             token_count += batch_info["batch_tokens"]
+            mask_pct = batch_info["mask_pct"]
 
             # take a backward step (gradient accumulation taken care of)
             train_logs, param_logs = train_step(
@@ -81,15 +89,15 @@ def main(cfg: Config):
 
             # validate
             if step % cfg.exp.eval_every == 0:
+                rng_noise, rng_t_val, rng_mask_val = jax.random.split(rng_noise, 3)
                 val_logs = validation_loop(
-                    cfg, model, val_loader, noise_schedule, rng_t, rng_mask
+                    cfg, model, val_loader, noise_schedule, rng_t_val, rng_mask_val
                 )
             else:
                 val_logs = {}
 
             # logging
             if step % cfg.exp.log_every == 0:
-                info = {"tokens": token_count, "mask_pct": batch_info["mask_pct"]}
                 metric_logger.step(
                     {
                         "train": train_logs,
@@ -112,8 +120,8 @@ def main(cfg: Config):
             bar.set_postfix(
                 {
                     "mask_pct": float(mask_pct),
-                    "train_loss": train_logs["loss"],
-                    "train_ppl": train_logs["ppl"],
+                    "train_loss": float(train_logs["loss"]),
+                    "train_ppl": float(train_logs["ppl"]),
                 }
             )
             bar.update(1)

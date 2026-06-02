@@ -10,9 +10,10 @@ import orbax.checkpoint as ocp
 import wandb
 
 from src.config import Config, ExperimentConfig
+from src.data import prepare_batch
 from src.model import DiffusionTransformer
 from src.schedules import NoiseSchedule
-from src.data import prepare_batch
+from src.training import val_step
 
 
 class MetricLogger:
@@ -97,21 +98,34 @@ def load_checkpoint(cfg: Config, optimizer: nnx.Optimizer):
     return model, optimizer
 
 
-def validation_loop(cfg: Config, model: DiffusionTransformer, val_loader: tp.Iterator, noise_schedule: NoiseSchedule, rng_t: jax.random.PRNGKey, rng_mask: jax.random.PRNGKey) -> tp.Dict:
+def validation_loop(
+    cfg: Config,
+    model: DiffusionTransformer,
+    val_loader: tp.Iterator,
+    noise_schedule: NoiseSchedule,
+    rng_t: jax.random.PRNGKey,
+    rng_mask: jax.random.PRNGKey,
+) -> tp.Dict:
     val_logs = {}
+    n = 0
 
     for raw_tokens in val_loader:
-        batch, _ = prepare_batch(raw_tokens, noise_schedule, cfg, rng_t, rng_mask, training=False)
+        rng_t, rng_t_batch = jax.random.split(rng_t)
+        rng_mask, rng_mask_batch = jax.random.split(rng_mask)
+        batch, _ = prepare_batch(
+            raw_tokens, noise_schedule, cfg, rng_t_batch, rng_mask_batch, training=False
+        )
         labels = batch.pop("labels")
         per_val_step_logs = val_step(model, noise_schedule, batch, labels)
 
         for k in per_val_step_logs.keys():
             if k not in val_logs:
-              val_logs[k] = 0
-          val_logs[k] += per_val_step_logs[k]
+                val_logs[k] = 0.0
+            val_logs[k] += float(per_val_step_logs[k])
+        n += 1
 
-    for k, v in val_logs.items():
-        val_logs[k] = v / n
+    for k in val_logs:
+        val_logs[k] = val_logs[k] / n
 
     return val_logs
 

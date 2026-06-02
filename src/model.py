@@ -7,7 +7,14 @@ from functools import partial
 import flax.nnx as nnx
 import jax
 import jax.numpy as jnp
+
 from src.config import ModelConfig
+
+# ── data‑parallel sharding: all parameters replicated ──────────────────────
+_KERNEL_INIT = nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, None))
+_BIAS_INIT = nnx.with_partitioning(nnx.initializers.zeros_init(), (None,))
+_SCALE_INIT = nnx.with_partitioning(nnx.initializers.ones_init(), (None,))
+_EMBED_INIT = nnx.with_partitioning(nnx.initializers.normal(stddev=1.0), (None, None))
 
 
 def sinusoidal_embedding(t: jax.Array, dim: int) -> jax.Array:
@@ -37,9 +44,17 @@ def apply_rope(x: jax.Array, freqs: jax.Array) -> jax.Array:
 
 class AdaLN(nnx.Module):
     def __init__(self, d_model: int, time_emb_dim: int, rngs: nnx.Rngs):
-        self.norm = nnx.LayerNorm(d_model, rngs=rngs)
-        # projects time_emb → (γ, β), each of size d_model
-        self.proj = nnx.Linear(time_emb_dim, 2 * d_model, use_bias=True, rngs=rngs)
+        self.norm = nnx.LayerNorm(
+            d_model, rngs=rngs, scale_init=_SCALE_INIT, bias_init=_BIAS_INIT
+        )
+        self.proj = nnx.Linear(
+            time_emb_dim,
+            2 * d_model,
+            use_bias=True,
+            rngs=rngs,
+            kernel_init=_KERNEL_INIT,
+            bias_init=_BIAS_INIT,
+        )
 
     def __call__(self, x: jax.Array, time_emb: jax.Array) -> jax.Array:
         # x        : (B, L, D)
@@ -58,10 +73,23 @@ class MultiHeadAttention(nnx.Module):
         self.n_heads = n_heads
         self.head_dim = d_model // n_heads
         self.dropout = nnx.Dropout(dropout, rngs=rngs)
-        self.q_proj = nnx.Linear(d_model, d_model, use_bias=False, rngs=rngs)
-        self.k_proj = nnx.Linear(d_model, d_model, use_bias=False, rngs=rngs)
-        self.v_proj = nnx.Linear(d_model, d_model, use_bias=False, rngs=rngs)
-        self.out_proj = nnx.Linear(d_model, d_model, use_bias=True, rngs=rngs)
+        self.q_proj = nnx.Linear(
+            d_model, d_model, use_bias=False, rngs=rngs, kernel_init=_KERNEL_INIT
+        )
+        self.k_proj = nnx.Linear(
+            d_model, d_model, use_bias=False, rngs=rngs, kernel_init=_KERNEL_INIT
+        )
+        self.v_proj = nnx.Linear(
+            d_model, d_model, use_bias=False, rngs=rngs, kernel_init=_KERNEL_INIT
+        )
+        self.out_proj = nnx.Linear(
+            d_model,
+            d_model,
+            use_bias=True,
+            rngs=rngs,
+            kernel_init=_KERNEL_INIT,
+            bias_init=_BIAS_INIT,
+        )
 
     def __call__(
         self,
@@ -95,8 +123,22 @@ class MultiHeadAttention(nnx.Module):
 
 class FFN(nnx.Module):
     def __init__(self, d_model: int, d_ff: int, dropout: float, rngs: nnx.Rngs):
-        self.fc1 = nnx.Linear(d_model, d_ff, use_bias=True, rngs=rngs)
-        self.fc2 = nnx.Linear(d_ff, d_model, use_bias=True, rngs=rngs)
+        self.fc1 = nnx.Linear(
+            d_model,
+            d_ff,
+            use_bias=True,
+            rngs=rngs,
+            kernel_init=_KERNEL_INIT,
+            bias_init=_BIAS_INIT,
+        )
+        self.fc2 = nnx.Linear(
+            d_ff,
+            d_model,
+            use_bias=True,
+            rngs=rngs,
+            kernel_init=_KERNEL_INIT,
+            bias_init=_BIAS_INIT,
+        )
         self.dropout = nnx.Dropout(dropout, rngs=rngs)
 
     def __call__(
@@ -119,8 +161,8 @@ class TransformerBlock(nnx.Module):
             self.adnorm1 = AdaLN(cfg.d_model, time_emb_dim, rngs)
             self.adnorm2 = AdaLN(cfg.d_model, time_emb_dim, rngs)
         else:
-            self.norm1 = nnx.RMSNorm(cfg.d_model, rngs=rngs)
-            self.norm2 = nnx.RMSNorm(cfg.d_model, rngs=rngs)
+            self.norm1 = nnx.RMSNorm(cfg.d_model, rngs=rngs, scale_init=_SCALE_INIT)
+            self.norm2 = nnx.RMSNorm(cfg.d_model, rngs=rngs, scale_init=_SCALE_INIT)
 
         self.attn = MultiHeadAttention(cfg.d_model, cfg.n_heads, cfg.dropout, rngs)
         self.ffn = FFN(cfg.d_model, cfg.ff_dim, cfg.dropout, rngs)
@@ -144,14 +186,28 @@ class TransformerBlock(nnx.Module):
 class DiffusionTransformer(nnx.Module):
     def __init__(self, cfg: ModelConfig, rngs: nnx.Rngs):
         self.cfg = cfg
-        self.token_emb = nnx.Embed(cfg.vocab_size, cfg.d_model, rngs=rngs)
+        self.token_emb = nnx.Embed(
+            cfg.vocab_size, cfg.d_model, rngs=rngs, embedding_init=_EMBED_INIT
+        )
         self.time_emb_dim = None
 
         if self.cfg.time_conditioning:
             self.time_emb_dim = cfg.d_model * 4
             # Time MLP: sinusoidal(t) → Linear → SiLU → Linear
-            self.time_fc1 = nnx.Linear(cfg.d_model, self.time_emb_dim, rngs=rngs)
-            self.time_fc2 = nnx.Linear(self.time_emb_dim, self.time_emb_dim, rngs=rngs)
+            self.time_fc1 = nnx.Linear(
+                cfg.d_model,
+                self.time_emb_dim,
+                rngs=rngs,
+                kernel_init=_KERNEL_INIT,
+                bias_init=_BIAS_INIT,
+            )
+            self.time_fc2 = nnx.Linear(
+                self.time_emb_dim,
+                self.time_emb_dim,
+                rngs=rngs,
+                kernel_init=_KERNEL_INIT,
+                bias_init=_BIAS_INIT,
+            )
 
         self.blocks = nnx.List(
             [
@@ -159,9 +215,13 @@ class DiffusionTransformer(nnx.Module):
                 for _ in range(cfg.n_layers)
             ]
         )
-        self.final_norm = nnx.RMSNorm(cfg.d_model, rngs=rngs)
+        self.final_norm = nnx.RMSNorm(cfg.d_model, rngs=rngs, scale_init=_SCALE_INIT)
         self.lm_head = nnx.Linear(
-            cfg.d_model, cfg.vocab_size, use_bias=False, rngs=rngs
+            cfg.d_model,
+            cfg.vocab_size,
+            use_bias=False,
+            rngs=rngs,
+            kernel_init=_KERNEL_INIT,
         )
 
     def count_params(self, nonembed: bool = True) -> int:
