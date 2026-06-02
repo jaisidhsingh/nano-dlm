@@ -1,8 +1,8 @@
 # Executable should be a full path
-executable=/home/jsingh/nano-dlm/cluster/run.sh
+executable=/home/projects/jsingh/nano-dlm/cluster/run.sh
 
 # Logs
-LOGS_DIR=/fast/najroldi/logs/plainLM
+LOGS_DIR=/fast/jsingh/logs/nano-dlm
 error = $(LOGS_DIR)/err/job.$(Cluster).$(Process).err
 output = $(LOGS_DIR)/out/job.$(Cluster).$(Process).out
 log = $(LOGS_DIR)/log/job.$(Cluster).$(Process).log

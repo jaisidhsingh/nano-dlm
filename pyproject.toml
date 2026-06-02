@@ -1,0 +1,48 @@
+[project]
+name = "nano-dlm"
+description = "nanoGPT for Diffusion Language Models"
+authors = [
+    { name = "Jaisidh Singh" }
+]
+license = { file = "LICENSE" }
+readme = "README.md"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+  "jax[cuda12]>=0.10.0",
+  "jax>=0.10.0",
+  "jaxlib>=0.10.0",
+  "flax>=0.12.7",
+  "optax>=0.2.8",
+  "tyro>=1.0.13",
+  "tiktoken>=0.12.0",
+  "datasets>=4.8.5",
+  "orbax>=0.1.9",
+  "grain>=0.2.16",
+  "wandb>=0.27.0"
+]
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["src"]
+
+[tool.ruff]
+line-length = 150
+indent-width = 2
+
+[tool.ruff.format]
+quote-style = "single"
+
+[tool.ruff.lint]
+extend-select = [
+    "BLE",      # disallow catch-all exceptions
+    "F",        # Pyflakes rules
+    "FA",       # Enforce from __future__ import annotations
+    "I",        # Isort rules
+    "ICN",      # Use common import conventions
+    "PLE",      # Pylint Errors
+    "TID",      # Some good import practices
+]

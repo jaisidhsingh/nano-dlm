@@ -11,4 +11,8 @@ echo "Conda profile sourced and environment activated"
 cd /home/jsingh/projects/nano-dlm
 nvidia-smi
 
+mkdir -p /fast/jsingh/logs/nano-dlm/err
+mkdir -p /fast/jsingh/logs/nano-dlm/log
+mkdir -p /fast/jsingh/logs/nano-dlm/out
+
 python train.py
