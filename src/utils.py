@@ -12,6 +12,7 @@ import wandb
 from src.config import Config, ExperimentConfig
 from src.model import DiffusionTransformer
 from src.schedules import NoiseSchedule
+from src.data import prepare_batch
 
 
 class MetricLogger:
@@ -94,6 +95,25 @@ def load_checkpoint(cfg: Config, optimizer: nnx.Optimizer):
     nnx.update(optimizer, opt_state)
 
     return model, optimizer
+
+
+def validation_loop(cfg: Config, model: DiffusionTransformer, val_loader: tp.Iterator, noise_schedule: NoiseSchedule, rng_t: jax.random.PRNGKey, rng_mask: jax.random.PRNGKey) -> tp.Dict:
+    val_logs = {}
+
+    for raw_tokens in val_loader:
+        batch, _ = prepare_batch(raw_tokens, noise_schedule, cfg, rng_t, rng_mask, training=False)
+        labels = batch.pop("labels")
+        per_val_step_logs = val_step(model, noise_schedule, batch, labels)
+
+        for k in per_val_step_logs.keys():
+            if k not in val_logs:
+              val_logs[k] = 0
+          val_logs[k] += per_val_step_logs[k]
+
+    for k, v in val_logs.items():
+        val_logs[k] = v / n
+
+    return val_logs
 
 
 @nnx.jit

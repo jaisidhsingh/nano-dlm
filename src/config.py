@@ -75,6 +75,7 @@ class ExperimentConfig:
     eval_every: int = 50
     saving: bool = True
     save_every: int = 50
+    save_last: bool = True
 
     out_dir: str = "runs/default"
     resume: bool = False

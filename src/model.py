@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import math
 import typing as tp
+from functools import partial
 
 import flax.nnx as nnx
 import jax
 import jax.numpy as jnp
-
 from src.config import ModelConfig
 
 
@@ -174,11 +174,7 @@ class DiffusionTransformer(nnx.Module):
         return total
 
     def __call__(
-        self,
-        xt: jax.Array,
-        t: jax.Array,
-        training: bool = False,
-        rng: tp.Optional[jax.Array] = None,
+        self, xt: jax.Array, t: jax.Array, training: bool = False
     ) -> jax.Array:
         L = xt.shape[1]
         x = self.token_emb(xt)
@@ -198,3 +194,8 @@ class DiffusionTransformer(nnx.Module):
         x = self.final_norm(x)
         logits = self.lm_head(x)
         return logits
+
+
+@partial(jax.jit, static_argnums=(0,))
+def init_model(cfg: ModelConfig) -> DiffusionTransformer:
+    return DiffusionTransformer(cfg, rngs=nnx.Rngs(cfg.init_seed))

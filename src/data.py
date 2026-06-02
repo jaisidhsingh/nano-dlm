@@ -2,27 +2,29 @@ from __future__ import annotations
 
 import typing as tp
 
+import jax
 import jax.numpy as jnp
 import tiktoken
-
-from src.config import DataConfig
+from jax.sharding import PartitionSpec as P
+from src.config import Config, DataConfig
+from src.schedules import NoiseSchedule
 
 
 class Tokenizer:
     def __init__(self, tokenizer_id: str = "gpt2"):
         self._tok = tiktoken.get_encoding(tokenizer_id)
 
-    def encode(self, text: str) -> jnp.ndarray:
+    def encode(self, text: str) -> jax.Array:
         return jnp.array(self._tok.encode(text), dtype=jnp.int32)
 
-    def decode(self, tokens: jnp.ndarray) -> str:
-        return self._tok.decode(tokens)
+    def decode(self, tokens: jax.Array) -> str:
+        return self._tok.decode(tokens.tolist())
 
-    def __call__(self, text: str) -> jnp.ndarray:
+    def __call__(self, text: str) -> jax.Array:
         return self.encode(text)
 
     def __len__(self):
-        return len(self._tok)
+        return self._tok.n_vocab
 
 
 def get_dataloaders(
@@ -65,3 +67,37 @@ def get_dataloaders(
         val_loader = iter(val_dataset)
         return train_loader, val_loader
     return train_loader
+
+
+def prepare_batch(
+    raw_tokens: jax.Array,
+    noise_schedule: NoiseSchedule,
+    cfg: Config,
+    rng_t: jax.Array,
+    rng_mask: jax.Array,
+    training: bool = True,
+) -> tp.Tuple:
+    x0 = jax.device_put(raw_tokens, P("data", None))
+    t = jax.device_put(
+        jax.random.randint(rng_t, (cfg.train.batch_size,), 1, cfg.model.T + 1),
+        P("data", None),
+    )
+    xt = jax.device_put(
+        noise_schedule.q_sample(x0, t, cfg.model.mask_token_id, rng_mask),
+        P("data", None),
+    )
+    batch_info = {}
+    batch = {
+        "input_ids": xt,
+        "timesteps": t,
+        "labels": raw_tokens,
+        "training": training,
+    }
+
+    if training:
+        batch_tokens = x0.shape[0] * x0.shape[1]
+        mask_pct = (xt == cfg.model.mask_token_id).mean() * 100
+        batch_info["batch_tokens"] = batch_tokens
+        batch_info["mask_pct"] = mask_pct
+
+    return batch, batch_info

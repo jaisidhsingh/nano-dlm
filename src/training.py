@@ -4,7 +4,6 @@ import flax.nnx as nnx
 import jax
 import jax.numpy as jnp
 import optax
-
 from src.config import TrainConfig
 from src.model import DiffusionTransformer
 from src.schedules import NoiseSchedule
@@ -12,20 +11,19 @@ from src.schedules import NoiseSchedule
 
 def loss_fn(
     model: DiffusionTransformer,
-    x0: jax.Array,
-    xt: jax.Array,
-    t: jax.Array,
     schedule: NoiseSchedule,
+    inputs: tp.Dict,
+    labels: jax.Array,
 ) -> jax.Array:
-    logits = model(xt, t, training=True)  # (B, L, V)
+    logits = model(**inputs)  # (B, L, V)
 
-    mask = xt == model.cfg.mask_token_id  # (B, L)
+    mask = inputs["input_ids"] == model.cfg.mask_token_id  # (B, L)
     n_masked = mask.sum().astype(jnp.float32)
 
     loss_per_pos = optax.softmax_cross_entropy_with_integer_labels(
-        logits=logits, labels=x0
+        logits=logits, labels=labels
     )
-    loss_weights = schedule.loss_weight(t)[:, None]
+    loss_weights = schedule.loss_weight(inputs["timesteps"])[:, None]
     loss = (loss_weights * jnp.where(mask, loss_per_pos, 0.0)).sum() / jnp.maximum(
         n_masked, 1.0
     )
@@ -51,11 +49,11 @@ def train_step(
     model: DiffusionTransformer,
     optimizer: nnx.Optimizer,
     schedule: NoiseSchedule,
-    batch: tp.Tuple[jax.Array, jax.Array, jax.Array],
+    inputs: tp.Dict,
+    labels: jax.Array
 ) -> tp.Tuple[tp.Dict[str, jax.Array], tp.Dict[str, jax.Array]]:
-    x0, xt, t = batch
     grad_fn = nnx.value_and_grad(loss_fn)
-    loss, grads = grad_fn(model, x0, xt, t, schedule)
+    loss, grads = grad_fn(model, schedule, inputs, labels)
 
     grad_norm = get_grad_norm(grads)
     optimizer.update(model, grads)
@@ -71,11 +69,15 @@ def train_step(
 def val_step(
     model: DiffusionTransformer,
     schedule: NoiseSchedule,
-    batch: tp.Tuple[jax.Array, jax.Array, jax.Array],
+    inputs: tp.Dict,
+    labels: jax.Array
 ) -> tp.Dict:
     x0, xt, t = batch
-    loss = loss_fn(model, x0, xt, t, schedule)
+    loss = loss_fn(model, schedule, inputs, labels)
     return {"loss": loss, "ppl": jnp.exp(loss)}
+
+
+def validation_loop(model: DiffusionTransformer):
 
 
 def get_lr_schedule(cfg: TrainConfig) -> tp.Union[float, optax.Schedule]:
