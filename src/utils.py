@@ -103,8 +103,8 @@ def validation_loop(
     model: DiffusionTransformer,
     val_loader: tp.Iterator,
     noise_schedule: NoiseSchedule,
-    rng_t: jax.random.PRNGKey,
-    rng_mask: jax.random.PRNGKey,
+    rng_t: jax.Array,
+    rng_mask: jax.Array,
 ) -> tp.Dict:
     val_logs = {}
     n = 0
